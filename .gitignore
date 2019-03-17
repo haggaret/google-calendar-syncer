@@ -1,0 +1,9 @@
+.idea
+**/cache
+**/package
+**/*.log*
+**/credentials.json
+**/token.json
+**/config.json
+packaged-template.yaml
+google-calendar-syncer.zip

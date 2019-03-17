@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Lambda function to sync source google calendar(s) to desitination calendar
+
+Parameters:
+  Debug:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: "false"
+  S3Bucket:
+    Type: String
+    Description: Bucket name where config, cache and credentials are stored. If not provided will default to <AccountId>-google-calendar-syncer
+    Default: ""
+  Schedule:
+    Type: String
+    Description: "The schedule expression to use, eg. rate(4 hours) or cron(0 12 * * ? *)"
+    Default: "rate(4 hours)"
+
+Conditions:
+  DefaultBucketName: !Equals [ !Ref S3Bucket, "" ]
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: "AllowIAMPolicyModifications"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Cloudwatch logs for the function
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogStreams"
+                Resource:
+                  - "*"
+              # S3
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]]]
+                  - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer/*']], !Join ['', [!Ref S3Bucket, '/*']]]]]
+
+  googleCalendarSyncer:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: google-calendar-syncer.lambda_handler
+      Runtime: python3.6
+      CodeUri: ./google-calendar-syncer.zip
+      Description: Lambda function to sync source google calendar(s) to desitination calendar
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt ExecutionRole.Arn
+      Environment:
+        Variables:
+          DEBUG: !Ref Debug
+          S3_BUCKET: !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]
+
+  lambdaScheduledRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Run google-calendar-syncer using the given schedule"
+      ScheduleExpression: !Ref Schedule
+      State: "ENABLED"
+      Targets:
+        -
+          Arn: !GetAtt googleCalendarSyncer.Arn
+          Id: "google_calendar_syncer"
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt lambdaScheduledRule.Arn
+      FunctionName: !GetAtt googleCalendarSyncer.Arn

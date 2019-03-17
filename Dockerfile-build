@@ -1,0 +1,19 @@
+FROM python:3.6.5-alpine
+
+RUN apk --no-cache add bash zip
+
+COPY google-calendar-syncer.py /
+COPY requirements.txt /
+
+RUN mkdir /build && mkdir /package
+
+RUN CWD=`pwd` && \
+ cd /build && \
+ pip install -r /requirements.txt --target . && \
+ zip -r9 ../google-calendar-syncer.zip . && \
+ cd $CWD && \
+ zip -g google-calendar-syncer.zip google-calendar-syncer.py && \
+ mv google-calendar-syncer.zip /package
+
+VOLUME /package
+
