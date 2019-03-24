@@ -21,6 +21,14 @@ logging.getLogger('botocore').setLevel(logging.CRITICAL)
 SCOPES = 'https://www.googleapis.com/auth/calendar'
 
 
+def _get_file_contents_as_json(file_path):
+    contents = None
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            contents = json.loads(f.read())
+    return contents
+
+
 def _get_from_s3(s3_client, bucket, key):
     file_contents = None
     # get config from S3
@@ -29,8 +37,30 @@ def _get_from_s3(s3_client, bucket, key):
     return file_contents
 
 
-def _put_to_s3(s3_client, bucket, key, file):
+def _get_from_dynamodb(table_client, key, desired_attrib=None):
+    result = None
+    # get data from dynamoDB
+    response = table_client.get_item(Key={'key': key})
+    if 'Item' in response:
+        item = response['Item']
+        result = item
+        if desired_attrib and desired_attrib in item:
+            # For now, assume all attribs are STRINGS (S)
+            result = item[desired_attrib]
+    return result
+
+
+def _put_file_to_s3(s3_client, bucket, key, file):
     s3_client.upload_file(Filename=file, Bucket=bucket, Key=key)
+
+
+def _put_obj_to_s3(s3_client, bucket, key, obj):
+    obj_contents = bytes(json.dumps(obj).encode('UTF-8'))
+    s3_client.put_object(Body=obj_contents, Bucket=bucket, Key=key)
+
+
+def _put_to_dynamodb(table_client, key, value):
+    table_client.put_item(Item={'key': key,'jsonData': value})
 
 
 def authorize(path_to_storage):
@@ -76,7 +106,7 @@ def parse_to_string(obj_to_parse):
     return result_str
 
 
-def _load_creds_and_cache(s3_client, s3_bucket, storage_path):
+def _load_creds_from_s3(s3_client, s3_bucket, storage_path):
     # Grab the oauth creds and cache from S3
     logging.info('Using temp dir: %s for temp storage' % storage_path)
     logging.info('Getting token.json')
@@ -91,66 +121,116 @@ def _load_creds_and_cache(s3_client, s3_bucket, storage_path):
     logging.info('Writing credentials.json to temp dir: %s' % storage_path)
     with open(creds_path, 'wb') as f:
         f.write(creds_contents)
-    logging.info('Checking for cache files...')
-    response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
-    cache_path = storage_path + os.sep + 'cache'
-    if not os.path.exists(cache_path):
-        os.makedirs(cache_path)
-    if len(response['Contents']) > 0:
-        logging.info('Getting cache files...')
-    for obj in response['Contents']:
-        if obj['Key'] == 'cache/':
-            continue
-        else:
-            # This a cache file
-            if obj['Key'].endswith('.old'):
-                continue
-            cache_obj_path = storage_path + os.sep + obj['Key']
-            cache_obj_contents = _get_from_s3(s3_client, s3_bucket, obj['Key'])
-            logging.info('Writing cache file to: %s' % cache_obj_path)
-            with open(cache_obj_path, 'wb') as f:
-                f.write(cache_obj_contents)
 
 
-def _get_config_from_s3(s3_client, bucket, key):
+def _load_creds_from_dynamodb(table_client, storage_path):
+    # Grab the oauth creds from DynamoDB
+    logging.info('Using temp dir: %s for temp storage' % storage_path)
+    logging.info('Getting token.json')
+    token_contents = _get_from_dynamodb(table_client, 'token', 'jsonData')
+    token_path = storage_path + os.sep + 'token.json'
+    logging.info('Writing token.json to temp dir: %s' % storage_path)
+    with open(token_path, 'w') as f:
+        f.write(token_contents)
+    logging.info('Getting credentials.json')
+    creds_contents = _get_from_dynamodb(table_client, 'credentials', 'jsonData')
+    creds_path = storage_path + os.sep + 'credentials.json'
+    logging.info('Writing credentials.json to temp dir: %s' % storage_path)
+    with open(creds_path, 'w') as f:
+        f.write(creds_contents)
+
+
+def _get_config_from_s3(s3_client, bucket):
     config = None
-    s3_content = _get_from_s3(s3_client, bucket, key)
+    s3_content = _get_from_s3(s3_client, bucket, 'config.json')
     if s3_content:
         config = json.loads(s3_content)
     return config
 
 
-def _get_calendar_cache(storage_path, calendar):
-    # Check to see if we have a cache for the from_calendar
-    cache = None
+def _get_config_from_dynamodb(table_client):
+    config = None
+    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'jsonData')
+    if dynamodb_content:
+        config = json.loads(dynamodb_content)
+    return config
+
+
+def _load_local_calendar_cache(storage_path):
+    # Check to see if we have a cache
+    cache = {}
     cache_path = storage_path + os.sep + 'cache'
-    cache_file = cache_path + os.sep + calendar + '.cache'
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            cache = json.loads(f.read())
+    for cache_file in os.listdir(cache_path):
+        if cache_file.endswith(".old"):
+            continue
+        else:
+            with open(os.path.join(cache_path, cache_file), 'r') as f:
+                cal_id = cache_file.rstrip('.cache')
+                cache[cal_id] = json.loads(f.read())
     return cache
 
 
-def _update_calendar_cache(storage_path, calendar, events):
+def _load_dynamodb_calendar_cache(table_client):
+    logging.info('Checking for cache...')
+    cache_dict = None
+    cache_contents = _get_from_dynamodb(table_client, 'cache', 'jsonData')
+    if cache_contents:
+        logging.info('Found cache')
+        cache_dict = json.loads(cache_contents)
+    return cache_dict
+
+
+def _load_s3_calendar_cache(s3_client, s3_bucket):
+    logging.info('Checking for cache files...')
+    cache_dict = {}
+    response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
+    if len(response['Contents']) > 0:
+        logging.info('Getting cache files...')
+    for obj in response['Contents']:
+        s3_path = obj['Key']
+        if s3_path == 'cache/':
+            continue
+        else:
+            # This a cache file
+            if s3_path.endswith('.old'):
+                continue
+            cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path).decode('utf-8')
+            # Get the cal_id from the s3_path
+            cal_id = s3_path.lstrip('cache/')
+            cache_dict[cal_id] = json.loads(cache_obj_contents)
+    return cache_dict
+
+
+def _update_local_calendar_cache(storage_path, new_cache, old_cache):
     cache_path = storage_path + os.sep + 'cache'
-    cache_file = cache_path + os.sep + calendar + '.cache'
-    old_cache_file = cache_file + '.old'
-    if os.path.exists(cache_file):
-        os.rename(cache_file, old_cache_file)
     if not os.path.exists(cache_path):
-        os.mkdir(cache_path)
-    with open(cache_file, 'w') as f:
-        f.write(json.dumps(events, indent=4))
+        os.makedirs(cache_path)
+    for cal in new_cache:
+        cache_file_path = cache_path + os.sep + cal + '.cache'
+        logging.info('Writing cache file to: %s' % cache_file_path)
+        with open(cache_file_path, 'wb') as f:
+            f.write(json.dumps(new_cache[cal], indent=4))
+    for cal in old_cache:
+        cache_file_path = cache_path + os.sep + cal + '.cache.old'
+        logging.info('Writing cache file to: %s' % cache_file_path)
+        with open(cache_file_path, 'wb') as f:
+            f.write(json.dumps(new_cache[cal], indent=4))
 
 
-def _update_s3_calendar_cache(s3_client, bucket, storage_path, calendar):
-    cache_key = 'cache/' + calendar + '.cache'
-    cache_path = storage_path + os.sep + 'cache'
-    new_cache_file = cache_path + os.sep + calendar + '.cache'
-    old_cache_file = new_cache_file + '.old'
-    old_cache_key = cache_key + '.old'
-    _put_to_s3(s3_client, bucket, old_cache_key, old_cache_file)
-    _put_to_s3(s3_client, bucket, cache_key, new_cache_file)
+def _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache):
+    for cal in new_cache:
+        cache_key = 'cache/' + cal + '.cache'
+        _put_obj_to_s3(s3_client, bucket, cache_key, new_cache[cal])
+    for cal in old_cache:
+        old_cache_key = 'cache/' + cal + '.cache.old'
+        _put_obj_to_s3(s3_client, bucket, old_cache_key, old_cache[cal])
+
+
+def _update_dynamodb_calendar_cache(table_client, new_cache=None, old_cache=None):
+    if new_cache:
+        _put_to_dynamodb(table_client, 'cache', json.dumps(new_cache))
+    if old_cache:
+        _put_to_dynamodb(table_client, 'cache.old', json.dumps(old_cache))
 
 
 def get_events_for_calendar(starting_datetime, service_client, calendar_id, limit=0):
@@ -374,6 +454,24 @@ def sync_events_to_calendar(service_client, now, from_cal, from_cal_cache, from_
                 logging.info('      Updated %s events in calendar: %s' % (str(insert_count), to_cal))
 
 
+def sync_events(service, time, config, cache=None, dryrun=False):
+    old_cache={}
+    new_cache={}
+    for item in config:
+        logging.info('Processing %s' % item)
+        dest_cal_id = config[item]['destination_cal_id']
+        for src_cal in config[item]['source_cals']:
+            logging.info('   Syncing events from %s' % src_cal['name'])
+            src_cal_id = src_cal['cal_id']
+            src_cal_events = get_events_for_calendar(time, service, src_cal_id, 0)
+            logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
+            src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
+            sync_events_to_calendar(service, time, src_cal_id, src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
+            old_cache[src_cal_id] = cache[src_cal_id]
+            new_cache[src_cal_id] = src_cal_events
+    return (old_cache, new_cache)
+
+
 def lambda_handler(event, context):
     log_level = logging.INFO
     if 'DEBUG' in os.environ and os.environ['DEBUG'].lower() == "true":
@@ -384,49 +482,71 @@ def lambda_handler(event, context):
 
     logging.debug("Received event: " + json.dumps(event, indent=2))
 
-    if not 'S3_BUCKET' in os.environ:
-        logging.info('Missing S3_BUCKET environment variable - cannot continue')
+    s3_client = None
+    table_client = None
 
-    # config will live in an S3 bucket in the config.json file
-    bucket = os.environ.get('S3_BUCKET')
-    key = 'config.json'
+    if 'DYNAMODB_TABLE' in os.environ:
+        # Prefer DynamoDB over S3
+        table = os.environ.get('DYNAMODB_TABLE')
+        dynamodb_client = boto3.resource('dynamodb')
+        table_client = dynamodb_client.Table(table)
+    elif 'S3_BUCKET' in os.environ:
+        bucket = os.environ.get('S3_BUCKET')
+        s3_client = boto3.client('s3')
+    else:
+        logging.critical('Missing required env var (DYNAMODB_TABLE/S3_BUCKET) - cannot continue')
+        exit(1)
 
     dryrun = False
     if 'DRYRUN' in os.environ:
         dryrun = True
 
-    s3_client = boto3.client('s3')
+    config = None
+    if table_client:
+        config = _get_config_from_dynamodb(table_client)
+    elif s3_client:
+        config = _get_config_from_s3(s3_client, bucket)
 
-    config = _get_config_from_s3(s3_client, bucket, key)
+    if not config:
+        logging.critical('Missing config - cannot continue')
+        exit(1)
+
+    cache = None
 
     storage_path = tempfile.mkdtemp()
-    # Get the OAUTH credentials and cache (if it exists)
-    _load_creds_and_cache(s3_client, bucket, storage_path)
+    # Get the OAUTH credentials
+    if table_client:
+        _load_creds_from_dynamodb(table_client, storage_path)
+        cache = _load_dynamodb_calendar_cache(table_client)
+    else:
+        _load_creds_from_s3(s3_client, bucket, storage_path)
+        cache = _load_s3_calendar_cache(s3_client, bucket)
 
     service = authorize(storage_path)
 
+    logging.debug("STARTING RUN")
+
+    # TODO: Not sure this is what we want - might want to save time the last check was done
     # Time NOW - only look at events from this point forward...
     now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
 
-    for item in config:
-        logging.info('Processing %s' % item)
-        dest_cal_id = config[item]['destination_cal_id']
-        for src_cal in config[item]['source_cals']:
-            logging.info('   Syncing events from %s' % src_cal['name'])
-            src_cal_events = get_events_for_calendar(now, service, src_cal['cal_id'], 0)
-            logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
-            # Get the src_cal cache
-            src_cal_cache = _get_calendar_cache(storage_path, src_cal['cal_id'])
-            sync_events_to_calendar(service, now, src_cal['cal_id'], src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
-            if not dryrun:
-                # Update the calendar cache file
-                _update_calendar_cache(storage_path, src_cal['cal_id'], src_cal_events)
-                _update_s3_calendar_cache(s3_client, bucket, storage_path, src_cal['cal_id'])
+    old_cache, new_cache = sync_events(service, now, config, cache, dryrun=dryrun)
 
-    # Update the token file in S3
+    if not dryrun:
+        # Udpate the cache
+        if table_client:
+            _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
+        else:
+            _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache)
+
+    # Update the token file
     token_key = 'token.json'
-    token_path = storage_path + os.sep + 'token.json'
-    _put_to_s3(s3_client, bucket, token_key, token_path)
+    token_path = storage_path + os.sep + token_key
+    if table_client:
+        token_json = _get_file_contents_as_json(token_path)
+        _put_to_dynamodb(table_client, 'token', json.dumps(token_json))
+    else:
+        _put_file_to_s3(s3_client, bucket, token_key, token_path)
 
     logging.info ('Cleaning up...')
     shutil.rmtree(storage_path)
@@ -439,17 +559,15 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='google-calendar-syncer')
     parser.add_argument("--init", help="Initialize - create token.json and credentials.json", action='store_true')
-    parser.add_argument("--config", help="path to config file", dest='config')
+    parser.add_argument("--config", help="path to config", dest='config')
     parser.add_argument("--src-cal-id", help="source cal ID", dest='src_cal_id')
     parser.add_argument("--dst-cal-id", help="destination cal ID", dest='dst_cal_id')
     parser.add_argument("--limit", help="Limit to next X events (0)", dest='limit', default=0)
     parser.add_argument("--profile", help="AWS Profile to use when communicating with S3", dest='profile')
-    parser.add_argument("--region", help="AWS region S3 bucket is in", dest='region')
+    parser.add_argument("--region", help="AWS region S3 bucket is in", dest='region', required=True)
     parser.add_argument("--cleanup", help="Clean up temp folder after exection", action='store_true')
-    parser.add_argument("--verbose", help="Turn on DEBUG logging", action='store_true', required=False)
-    parser.add_argument("--dryrun", help="Do a dryrun - no changes will be performed", dest='dryrun',
-                        action='store_true', default=False,
-                        required=False)
+    parser.add_argument("--verbose", help="Turn on DEBUG logging", action='store_true')
+    parser.add_argument("--dryrun", help="Do a dryrun - no changes will be performed", dest='dryrun',action='store_true', default=False)
     args = parser.parse_args()
 
     log_level = logging.INFO
@@ -492,34 +610,60 @@ if __name__ == "__main__":
     config = None
     s3_client = None
     s3_bucket = None
+    table_client = None
+    dynamodb_client = None
 
     # Used for token.json, credentials.json and cache folder and files
     storage_path = '.'
+    cache = None
 
     if args.config:
         if args.config.startswith('s3://'):
-            s3_client = None
+            # S3 config
+            logging.info('S3 config specified')
             if args.profile or args.region:
                 session = boto3.session.Session(profile_name=args.profile, region_name=args.region)
                 s3_client = session.client('s3')
             else:
                 s3_client = boto3.client('s3')
-
             s3_path = args.config.split('s3://')[1]
             s3_bucket = s3_path.split('/')[0]
-            s3_key = s3_path.split('/', 1)[1]
-            config = _get_config_from_s3(s3_client, s3_bucket, s3_key)
+            config = _get_config_from_s3(s3_client, s3_bucket)
             storage_path = tempfile.mkdtemp()
-            # Get the credentials and cache
-            _load_creds_and_cache(s3_client, s3_bucket, storage_path)
+            # Get the credentials
+            _load_creds_from_s3(s3_client, s3_bucket, storage_path)
+            # Get the cache
+            cache = _load_s3_calendar_cache(s3_client, s3_bucket)
+        elif args.config.startswith('dynamodb:'):
+            # DynamoDB config
+            logging.info('DynamoDB config specified')
+            table_name = args.config.split('dynamodb:')[1]
+            if args.profile or args.region:
+                boto3.setup_default_session(profile_name=args.profile)
+                dynamodb_client = boto3.resource('dynamodb', region_name=args.region)
+            else:
+                dynamodb_client = boto3.client('dynamodb')
+            table_client = dynamodb_client.Table(table_name)
+            config = _get_config_from_dynamodb(table_client)
+            storage_path = tempfile.mkdtemp()
+            # Get the credentials
+            _load_creds_from_dynamodb(table_client, storage_path)
+            # Get the cache
+            cache = _load_dynamodb_calendar_cache(table_client)
+            logging.debug('Cache: %s' % json.dumps(cache, indent=4))
         else:
             # Local config file
+            logging.info('Local config specified')
             if os.path.exists(args.config):
                 with open(args.config, 'r') as f:
                     config = json.loads(f.read())
             else:
                 logging.error("Config file doesn't exist at given path: %s" % args.config)
                 exit(1)
+            cache_path = os.path.join(storage_path, 'cache')
+            if os.path.exists(cache_path):
+                cache = _load_local_calendar_cache(cache_path)
+
     else:
         # Single source and destination calendar provided
         config = {
@@ -534,6 +678,10 @@ if __name__ == "__main__":
             }
         }
 
+    if not config:
+        logging.critical('Config is empty - cannot continue')
+        exit(1)
+
     logging.debug("STARTING RUN")
 
     service = authorize(storage_path)
@@ -541,24 +689,18 @@ if __name__ == "__main__":
     # Time NOW - only look at events from this point forward...
     now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
 
-    for item in config:
-        logging.info('Processing %s' % item)
-        dest_cal_id = config[item]['destination_cal_id']
-        for src_cal in config[item]['source_cals']:
-            logging.info('   Syncing events from %s' % src_cal['name'])
-            src_cal_events = get_events_for_calendar(now, service, src_cal['cal_id'], 0)
-            # Get the src_cal cache
-            src_cal_cache = _get_calendar_cache(storage_path, src_cal['cal_id'])
-            sync_events_to_calendar(service, now, src_cal['cal_id'], src_cal_cache, src_cal_events, dest_cal_id, args.limit, args.dryrun)
+    old_cache, new_cache = sync_events(service, now, config, cache, args.dryrun)
 
-            if not args.dryrun:
-                # Update the calendar cache file
-                logging.info('Updating calendar cache for calendar with ID: %s' % src_cal['cal_id'])
-                if args.config.startswith('s3://'):
-                    _update_calendar_cache(storage_path, src_cal['cal_id'], src_cal_events)
-                    _update_s3_calendar_cache(s3_client, s3_bucket, storage_path, src_cal['cal_id'])
-                else:
-                    _update_calendar_cache(storage_path, src_cal['cal_id'], src_cal_events)
+    if not args.dryrun:
+        # Update the cache
+        if args.config.startswith('s3://'):
+            _update_s3_calendar_cache(s3_client, s3_bucket, new_cache, old_cache)
+        if args.config.startswith('dynamodb:'):
+            _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
+        else:
+            _update_local_calendar_cache(storage_path, new_cache, old_cache)
+    else:
+        logging.info('DRYRUN - cache contents:\n%s' % json.dumps(new_cache, indent=4))
 
     if args.cleanup:
         logging.info ('Cleaning up...')

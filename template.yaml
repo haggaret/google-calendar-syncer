@@ -60,8 +60,15 @@ Resources:
                 Resource:
                   - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]]]
                   - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer/*']], !Join ['', [!Ref S3Bucket, '/*']]]]]
+              # DynamoDB
+              -
+                Effect: "Allow"
+                Action:
+                  - "dynamodb:*"
+                Resource:
+                  - !GetAtt DynamodbTable.Arn
 
-  googleCalendarSyncer:
+  GoogleCalendarSyncer:
     Type: 'AWS::Serverless::Function'
     Properties:
       Handler: google-calendar-syncer.lambda_handler
@@ -76,7 +83,7 @@ Resources:
           DEBUG: !Ref Debug
           S3_BUCKET: !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]
 
-  lambdaScheduledRule:
+  LambdaScheduledRule:
     Type: "AWS::Events::Rule"
     Properties:
       Description: "Run google-calendar-syncer using the given schedule"
@@ -84,7 +91,7 @@ Resources:
       State: "ENABLED"
       Targets:
         -
-          Arn: !GetAtt googleCalendarSyncer.Arn
+          Arn: !GetAtt GoogleCalendarSyncer.Arn
           Id: "google_calendar_syncer"
 
   LambdaInvokePermission:
@@ -92,5 +99,21 @@ Resources:
     Properties:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt lambdaScheduledRule.Arn
-      FunctionName: !GetAtt googleCalendarSyncer.Arn
+      SourceArn: !GetAtt LambdaScheduledRule.Arn
+      FunctionName: !GetAtt GoogleCalendarSyncer.Arn
+
+  DynamodbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: GoogleCalendarSyncerConfig
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      AttributeDefinitions:
+        -
+          AttributeName: "key"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "key"
+          KeyType: "HASH"
