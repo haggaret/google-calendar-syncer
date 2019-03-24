@@ -467,7 +467,7 @@ def sync_events(service, time, config, cache=None, dryrun=False):
             logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
             src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
             sync_events_to_calendar(service, time, src_cal_id, src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
-            old_cache[src_cal_id] = cache[src_cal_id]
+            old_cache[src_cal_id] = src_cal_cache
             new_cache[src_cal_id] = src_cal_events
     return (old_cache, new_cache)
 
