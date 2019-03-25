@@ -9,22 +9,34 @@ Parameters:
       - true
       - false
     Default: "false"
-  S3Bucket:
+  UseS3:
     Type: String
-    Description: Bucket name where config, cache and credentials are stored. If not provided will default to <AccountId>-google-calendar-syncer
-    Default: ""
+    AllowedValues:
+      - true
+      - false
+    Default: "false"
+    Description: Use S3 Bucket to store config, cache and credentials. (Bucket name will be <accountID-GoogleCalendarSyncer)
+  UseDynamoDB:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: "true"
+    Description: Use DynamoDB to store config, cache and credentials. (Table name will be GoogleCalendarSyncer)
   Schedule:
     Type: String
     Description: "The schedule expression to use, eg. rate(4 hours) or cron(0 12 * * ? *)"
-    Default: "rate(4 hours)"
+    Default: "rate(1 hour)"
 
 Conditions:
-  DefaultBucketName: !Equals [ !Ref S3Bucket, "" ]
+  CreateBucket: !Equals [ !Ref UseS3, "true" ]
+  CreateTable: !Equals [ !Ref UseDynamoDB, "true" ]
 
 Resources:
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: GoogleCalendarSyncerExecutionRole
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -38,7 +50,7 @@ Resources:
       Path: /
       Policies:
         -
-          PolicyName: "AllowIAMPolicyModifications"
+          PolicyName: "GoogleCalendarSyncerStorageAccessPolicy"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -58,19 +70,20 @@ Resources:
                 Action:
                   - "s3:*"
                 Resource:
-                  - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]]]
-                  - !Join ['', ['arn:aws:s3:::', !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer/*']], !Join ['', [!Ref S3Bucket, '/*']]]]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer']]
+                  - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer/*']]
               # DynamoDB
               -
                 Effect: "Allow"
                 Action:
                   - "dynamodb:*"
                 Resource:
-                  - !GetAtt DynamodbTable.Arn
+                  - !Join ['', ['arn:aws:dynamodb:', !Ref "AWS::Region", ':', !Ref "AWS::AccountId", ':table/GoogleCalendarSyncer']]
 
   GoogleCalendarSyncer:
     Type: 'AWS::Serverless::Function'
     Properties:
+      FunctionName: GoogleCalendarSyncer
       Handler: google-calendar-syncer.lambda_handler
       Runtime: python3.6
       CodeUri: ./google-calendar-syncer.zip
@@ -81,7 +94,8 @@ Resources:
       Environment:
         Variables:
           DEBUG: !Ref Debug
-          S3_BUCKET: !If [DefaultBucketName, !Join ['', [!Ref "AWS::AccountId", '-google-calendar-syncer']], !Ref S3Bucket]
+          S3_BUCKET: !If [CreateBucket, !Join ['', [!Ref "AWS::AccountId", '-GoogleCalendarSyncer']], !Ref "AWS::NoValue"]
+          DYNAMODB_TABLE: !If [CreateTable, "GoogleCalendarSyncer", !Ref "AWS::NoValue"]
 
   LambdaScheduledRule:
     Type: "AWS::Events::Rule"
@@ -102,10 +116,19 @@ Resources:
       SourceArn: !GetAtt LambdaScheduledRule.Arn
       FunctionName: !GetAtt GoogleCalendarSyncer.Arn
 
+  S3Bucket:
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['', [!Ref "AWS::AccountId", '-GoogleCalendarSyncer']]
+
   DynamodbTable:
+    Condition: CreateTable
+    DeletionPolicy: Retain
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: GoogleCalendarSyncerConfig
+      TableName: GoogleCalendarSyncer
       ProvisionedThroughput:
         ReadCapacityUnits: 5
         WriteCapacityUnits: 5
