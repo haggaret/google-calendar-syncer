@@ -60,7 +60,8 @@ def _put_obj_to_s3(s3_client, bucket, key, obj):
 
 
 def _put_to_dynamodb(table_client, key, value):
-    table_client.put_item(Item={'key': key,'jsonData': value})
+    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
+    table_client.put_item(Item={'key': key,'jsonData': value, 'lastModified': now})
 
 
 def authorize(path_to_storage):
@@ -233,6 +234,32 @@ def _update_dynamodb_calendar_cache(table_client, new_cache=None, old_cache=None
         _put_to_dynamodb(table_client, 'cache.old', json.dumps(old_cache))
 
 
+def _get_last_sync_time_from_dynamodb(table_client):
+    logging.info('Checking for last sync time...')
+    last_sync = None
+    last_sync_contents = _get_from_dynamodb(table_client, 'last_sync', 'lastModified')
+    if last_sync_contents:
+        logging.info('Found last sync time')
+        last_sync = last_sync_contents
+    return last_sync
+
+
+def _get_last_sync_time_from_s3(s3_client, bucket):
+    last_sync = None
+    s3_content = _get_from_s3(s3_client, bucket, 'last_sync')
+    if s3_content:
+        last_sync = s3_content
+    return last_sync
+
+
+def _update_last_sync_time_in_dynamodb(table_client, sync_time):
+    table_client.put_item(Item={'key': 'last_sync', 'lastModified': sync_time})
+
+
+def _update_last_sync_time_in_s3(s3_client, bucket, sync_time):
+    _put_obj_to_s3(s3_client, bucket, 'last_sync', sync_time)
+
+
 def get_events_for_calendar(starting_datetime, service_client, calendar_id, limit=0):
     all_events = []
 
@@ -338,7 +365,7 @@ def update_event_in_calendar(service_client, event, calendar, dryrun=False):
         logging.info('Dryrun update event in calender(%s): %s' % (calendar, updated_event_body['summary']))
 
 
-def sync_events_to_calendar(service_client, now, from_cal, from_cal_cache, from_cal_events, to_cal, limit=0, dryrun=False):
+def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache, from_cal_events, to_cal, limit=0, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
@@ -356,10 +383,10 @@ def sync_events_to_calendar(service_client, now, from_cal, from_cal_cache, from_
                     break
             if not found_in_from:
                 # This cache_event may need to be deleted
-                now_time = dateutil.parser.parse(now)
+                last_sync_time = dateutil.parser.parse(last_sync)
                 if 'dateTime' in cache_event['start']:
                     start_time = dateutil.parser.parse(cache_event['start']['dateTime'])
-                    time_diff = start_time - now_time
+                    time_diff = start_time - last_sync_time
                     if not (time_diff.days < 0):
                         logging.debug('         Cache event with ID: %s should be deleted' % cache_event['id'])
                         events_to_delete.append(cache_event)
@@ -387,7 +414,7 @@ def sync_events_to_calendar(service_client, now, from_cal, from_cal_cache, from_
                     if time_diff.days < 0:
                         # Add this to the events_to_update list
                         logging.debug('         Cache event with ID: %s should be updated' % cache_event['id'])
-                        events_to_update.append(cache_event)
+                        events_to_update.append(from_event)
             if not found_in_cache:
                 # Didn't find the event ID in the cached events - it must be new
                 logging.debug('         Calendar event with ID: %s should be inserted' % from_event['id'])
@@ -417,7 +444,7 @@ def sync_events_to_calendar(service_client, now, from_cal, from_cal_cache, from_
         # No cache present - need to get events from the destination calendar and compare
         logging.debug('      No cache present - need to get events from destination calendar for comparison')
         logging.debug('      Getting all events for destination calendar with ID: %s' % to_cal)
-        to_calendar_events = get_events_for_calendar(now, service_client, to_cal, limit)
+        to_calendar_events = get_events_for_calendar(last_sync, service_client, to_cal, limit)
         logging.debug('      Destination Calendar events:\n%s' % json.dumps(to_calendar_events, indent=4))
 
         insert_count=0
@@ -512,32 +539,39 @@ def lambda_handler(event, context):
         exit(1)
 
     cache = None
+    last_sync_time = None
 
     storage_path = tempfile.mkdtemp()
     # Get the OAUTH credentials
     if table_client:
         _load_creds_from_dynamodb(table_client, storage_path)
         cache = _load_dynamodb_calendar_cache(table_client)
+        last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
     else:
         _load_creds_from_s3(s3_client, bucket, storage_path)
         cache = _load_s3_calendar_cache(s3_client, bucket)
+        last_sync_time = _get_last_sync_time_from_s3(s3_client, bucket)
+
+    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
+
+    if not last_sync_time:
+        # no last sync time can be found - use the time NOW - only look at event from this point forward
+        last_sync_time = now
 
     service = authorize(storage_path)
 
     logging.debug("STARTING RUN")
 
-    # TODO: Not sure this is what we want - might want to save time the last check was done
-    # Time NOW - only look at events from this point forward...
-    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-
-    old_cache, new_cache = sync_events(service, now, config, cache, dryrun=dryrun)
+    old_cache, new_cache = sync_events(service, last_sync_time, config, cache, dryrun=dryrun)
 
     if not dryrun:
         # Udpate the cache
         if table_client:
             _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
+            _update_last_sync_time_in_dynamodb(table_client, now)
         else:
             _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache)
+            _update_last_sync_time_in_s3(s3_client, bucket, now)
 
     # Update the token file
     token_key = 'token.json'
@@ -616,6 +650,7 @@ if __name__ == "__main__":
     # Used for token.json, credentials.json and cache folder and files
     storage_path = '.'
     cache = None
+    last_sync_time = None
 
     if args.config:
         if args.config.startswith('s3://'):
@@ -634,6 +669,7 @@ if __name__ == "__main__":
             _load_creds_from_s3(s3_client, s3_bucket, storage_path)
             # Get the cache
             cache = _load_s3_calendar_cache(s3_client, s3_bucket)
+            last_sync_time = _get_last_sync_time_from_s3(s3_client, s3_bucket)
         elif args.config.startswith('dynamodb:'):
             # DynamoDB config
             logging.info('DynamoDB config specified')
@@ -651,6 +687,7 @@ if __name__ == "__main__":
             # Get the cache
             cache = _load_dynamodb_calendar_cache(table_client)
             logging.debug('Cache: %s' % json.dumps(cache, indent=4))
+            last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
         else:
             # Local config file
             logging.info('Local config specified')
@@ -686,17 +723,22 @@ if __name__ == "__main__":
 
     service = authorize(storage_path)
 
-    # Time NOW - only look at events from this point forward...
     now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
 
-    old_cache, new_cache = sync_events(service, now, config, cache, args.dryrun)
+    if not last_sync_time:
+        # no last sync time can be found - use the time NOW - only look at event from this point forward
+        last_sync_time = now
+
+    old_cache, new_cache = sync_events(service, last_sync_time, config, cache, args.dryrun)
 
     if not args.dryrun:
         # Update the cache
         if args.config.startswith('s3://'):
             _update_s3_calendar_cache(s3_client, s3_bucket, new_cache, old_cache)
+            _update_last_sync_time_in_s3(s3_client, s3_bucket, now)
         if args.config.startswith('dynamodb:'):
             _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
+            _update_last_sync_time_in_dynamodb(table_client, now)
         else:
             _update_local_calendar_cache(storage_path, new_cache, old_cache)
     else:
