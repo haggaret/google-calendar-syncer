@@ -16,6 +16,7 @@ logging.getLogger('googleapiclient.discovery').setLevel(logging.CRITICAL)
 logging.getLogger('oauth2client').setLevel(logging.CRITICAL)
 logging.getLogger('boto3').setLevel(logging.CRITICAL)
 logging.getLogger('botocore').setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = 'https://www.googleapis.com/auth/calendar'
@@ -283,7 +284,7 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
     return all_events
 
 
-def insert_into_calendar(service_client, event, calendar, dryrun=False):
+def insert_into_calendar(service_client, event, calendar, date_time_now, dryrun=False):
     new_event = {}
 
     new_event['id'] = event['id'].lstrip('_')
@@ -305,7 +306,9 @@ def insert_into_calendar(service_client, event, calendar, dryrun=False):
         new_event['location'] = event['location']
     if 'description' in event:
         new_event['description'] = event['description']
-        new_event['description'] = new_event['description'] + '\n\nSynced by google-calendar-syncer'
+        new_event['description'] = new_event['description'] + '\n\nSynced by google-calendar-syncer on %s' % date_time_now
+    else:
+        new_event['description'] = 'Synced by google-calendar-syncer on %s' % date_time_now
     if 'recurrence' in event:
         new_event['recurrence'] = event['recurrence']
     if 'reminders' in event:
@@ -369,6 +372,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache,
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
+    date_time_now = datetime.datetime.utcnow().isoformat() + 'Z'
     if from_cal_cache:
         logging.debug('      Found a cache for the source calendar with ID: %s' % from_cal)
         logging.debug('      Cached Calendar events:\n%s' % json.dumps(from_cal_cache, indent=4))
@@ -433,7 +437,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache,
                 logging.info('      Found some new events to add')
                 # Insert any new events
                 for new_event in events_to_insert:
-                    insert_into_calendar(service_client, new_event, to_cal, dryrun)
+                    insert_into_calendar(service_client, new_event, to_cal, date_time_now, dryrun)
 
             if len(events_to_update) > 0:
                 logging.info('      Found some events that need updating')
@@ -469,7 +473,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache,
                         update_count += 1
                         break
             if not found:
-                insert_into_calendar(service_client, from_event, to_cal, dryrun)
+                insert_into_calendar(service_client, from_event, to_cal, date_time_now, dryrun)
                 insert_count += 1
 
         if insert_count == 0 and update_count == 0:
