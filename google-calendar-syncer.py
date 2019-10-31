@@ -46,7 +46,6 @@ def _get_from_dynamodb(table_client, key, desired_attrib=None):
         item = response['Item']
         result = item
         if desired_attrib and desired_attrib in item:
-            # For now, assume all attribs are STRINGS (S)
             result = item[desired_attrib]
     return result
 
@@ -152,9 +151,9 @@ def _get_config_from_s3(s3_client, bucket):
 
 def _get_config_from_dynamodb(table_client):
     config = None
-    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'jsonData')
+    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'config_data')
     if dynamodb_content:
-        config = json.loads(dynamodb_content)
+        config = dynamodb_content
     return config
 
 
@@ -491,9 +490,10 @@ def sync_events(service, time, config, cache=None, dryrun=False):
     for item in config:
         logging.info('Processing %s' % item)
         dest_cal_id = config[item]['destination_cal_id']
-        for src_cal in config[item]['source_cals']:
-            logging.info('   Syncing events from %s' % src_cal['name'])
-            src_cal_id = src_cal['cal_id']
+        source_cals = config[item]['source_cals']
+        for src_cal in source_cals:
+            logging.info('   Syncing events from %s' % src_cal)
+            src_cal_id = source_cals[src_cal]
             src_cal_events = get_events_for_calendar(time, service, src_cal_id, 0)
             logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
             src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
