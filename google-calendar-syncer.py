@@ -151,7 +151,7 @@ def _get_config_from_s3(s3_client, bucket):
 
 def _get_config_from_dynamodb(table_client):
     config = None
-    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'config_data')
+    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'jsonData')
     if dynamodb_content:
         config = dynamodb_content
     return config
