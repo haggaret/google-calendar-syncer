@@ -35,25 +35,18 @@ Config file is a json document with the following info:
 {
   "Destination Calendar 1" : {
     "destination_cal_id" : "<destination_calendar_id>",
-    "source_cals" : [
+    "source_cals" : 
       {
-        "name": "Source Calendar Name",
-        "cal_id": "<source_calendar_id>"
+        "Source Calendar Name": "<source_calendar_id>"
       }
-    ]
   },
   "Destination Calendar 2" : {
     "destination_cal_id" : "<destination_calendar_id>",
-    "source_cals" : [
+    "source_cals" :
       {
-        "name": "Source Calendar 1",
-        "cal_id": "<source_calendar_id>"
-      },
-      {
-        "name": "Source Calendar 2",
-        "cal_id": "<source_calendar_id>"
-      }      
-    ]
+        "Source Calendar 1": "<source_calendar_id>",
+        "Source Calendar 2": "<source_calendar_id>"
+      }
   }
 }
 ```
