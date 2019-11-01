@@ -283,7 +283,7 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
     return all_events
 
 
-def insert_into_calendar(service_client, event, calendar, date_time_now, dryrun=False):
+def insert_into_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun=False):
     new_event = {}
 
     new_event['id'] = event['id'].lstrip('_')
@@ -305,9 +305,9 @@ def insert_into_calendar(service_client, event, calendar, date_time_now, dryrun=
         new_event['location'] = event['location']
     if 'description' in event:
         new_event['description'] = event['description']
-        new_event['description'] = new_event['description'] + '\n\nSynced by google-calendar-syncer on %s' % date_time_now
+        new_event['description'] = new_event['description'] + '\n\nSynced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
     else:
-        new_event['description'] = 'Synced by google-calendar-syncer on %s' % date_time_now
+        new_event['description'] = 'Synced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
     if 'recurrence' in event:
         new_event['recurrence'] = event['recurrence']
     if 'reminders' in event:
@@ -321,7 +321,7 @@ def insert_into_calendar(service_client, event, calendar, date_time_now, dryrun=
             logging.warning('         Exception inserting into calendar')
             if 'The requested identifier already exists' in str(e):
                 logging.info('         Requested ID already exists - try updating instead...')
-                update_event_in_calendar(service_client, event, calendar, dryrun)
+                update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun)
     else:
         logging.info('         Dryrun insert event into calendar(%s): %s' % (calendar, new_event['summary']))
 
@@ -339,7 +339,7 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
         logging.info('         Dryrun delete event from calendar(%s): %s' % (calendar, event['summary']))
 
 
-def update_event_in_calendar(service_client, event, calendar, dryrun=False):
+def update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun=False):
     event_id = event['id'].lstrip('_')
     updated_event_body = {}
     updated_event_body['start'] = event['start']
@@ -349,9 +349,9 @@ def update_event_in_calendar(service_client, event, calendar, dryrun=False):
     if 'description' in event:
         updated_event_body['description'] = event['description']
         if not 'Synced by google-calendar-syncer' in updated_event_body['description']:
-            updated_event_body['description'] = updated_event_body['description'] + '\n\nSynced by google-calendar-syncer'
+            updated_event_body['description'] = updated_event_body['description'] + '\n\nSynced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
     else:
-        updated_event_body['description'] = 'Synced by google-calendar-syncer'
+        updated_event_body['description'] = 'Synced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
     if 'location' in event:
         updated_event_body['location'] = event['location']
     if 'recurrence' in event:
@@ -367,13 +367,13 @@ def update_event_in_calendar(service_client, event, calendar, dryrun=False):
         logging.info('Dryrun update event in calender(%s): %s' % (calendar, updated_event_body['summary']))
 
 
-def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache, from_cal_events, to_cal, limit=0, dryrun=False):
+def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, from_cal_cache, from_cal_events, to_cal, limit=0, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
     date_time_now = datetime.datetime.utcnow().isoformat() + 'Z'
     if from_cal_cache:
-        logging.debug('      Found a cache for the source calendar with ID: %s' % from_cal)
+        logging.debug('      Found a cache for the source calendar with ID: %s' % from_cal_id)
         logging.debug('      Cached Calendar events:\n%s' % json.dumps(from_cal_cache, indent=4))
         # First find events to delete - these will exist in cache, but not in from_cal_events
         logging.debug('      Comparing cached events against Source calendar events')
@@ -436,13 +436,13 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache,
                 logging.info('      Found some new events to add')
                 # Insert any new events
                 for new_event in events_to_insert:
-                    insert_into_calendar(service_client, new_event, to_cal, date_time_now, dryrun)
+                    insert_into_calendar(service_client, from_cal, new_event, to_cal, date_time_now, dryrun)
 
             if len(events_to_update) > 0:
                 logging.info('      Found some events that need updating')
                 # Update events that need updating
                 for update_event in events_to_update:
-                    update_event_in_calendar(service_client, update_event, to_cal, dryrun)
+                    update_event_in_calendar(service_client, from_cal, update_event, to_cal, date_time_now, dryrun)
     else:
         # No cache present - need to get events from the destination calendar and compare
         logging.debug('      No cache present - need to get events from destination calendar for comparison')
@@ -468,11 +468,11 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_cache,
                     # if the from_event has a later updated time, we need to update the event
                     if time_diff.days < 0:
                         # Need to update this event
-                        update_event_in_calendar(service_client, from_event, to_cal, dryrun)
+                        update_event_in_calendar(service_client, from_cal, from_event, to_cal, date_time_now, dryrun)
                         update_count += 1
                         break
             if not found:
-                insert_into_calendar(service_client, from_event, to_cal, date_time_now, dryrun)
+                insert_into_calendar(service_client, from_cal, from_event, to_cal, date_time_now, dryrun)
                 insert_count += 1
 
         if insert_count == 0 and update_count == 0:
@@ -497,7 +497,7 @@ def sync_events(service, time, config, cache=None, dryrun=False):
             src_cal_events = get_events_for_calendar(time, service, src_cal_id, 0)
             logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
             src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
-            sync_events_to_calendar(service, time, src_cal_id, src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
+            sync_events_to_calendar(service, time, src_cal, src_cal_id, src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
             old_cache[src_cal_id] = src_cal_cache
             new_cache[src_cal_id] = src_cal_events
     return (old_cache, new_cache)
