@@ -33,7 +33,7 @@ def _get_file_contents_as_json(file_path):
 def _get_from_s3(s3_client, bucket, key):
     file_contents = None
     # get config from S3
-    response = s3_client.get_object(Bucket=bucket,Key=key)
+    response = s3_client.get_object(Bucket=bucket, Key=key)
     file_contents = response['Body'].read()
     return file_contents
 
@@ -61,7 +61,7 @@ def _put_obj_to_s3(s3_client, bucket, key, obj):
 
 def _put_to_dynamodb(table_client, key, value):
     now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-    table_client.put_item(Item={'key': key,'jsonData': value, 'lastModified': now})
+    table_client.put_item(Item={'key': key, 'jsonData': value, 'lastModified': now})
 
 
 def authorize(path_to_storage):
@@ -78,6 +78,7 @@ def authorize(path_to_storage):
         creds = tools.run_flow(flow, store)
     service = build('calendar', 'v3', cache_discovery=False, http=creds.authorize(Http()))
     return service
+
 
 def parse_to_string(obj_to_parse):
     result_str = None
@@ -269,14 +270,16 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
 
     logging.debug('      Getting events from calendar with ID: %s ' % calendar_id)
     response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
-                                     singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
+                                            singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
     events = response.get('items', [])
     all_events.extend(events)
 
     while 'nextSyncToken' in response:
         logging.debug('Getting more events from calendar ID: %s ' % calendar_id)
-        response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime, syncToken=response['nextSyncToken'],
-                                         singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
+        response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
+                                                syncToken=response['nextSyncToken'],
+                                                singleEvents=True, orderBy='startTime',
+                                                maxResults=max_results).execute()
         events = response.get('items', [])
         all_events.extend(events)
 
@@ -284,30 +287,23 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
 
 
 def insert_into_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun=False):
-    new_event = {}
+    new_event = {'id': event['id'].lstrip('_'), 'start': event['start'], 'end': event['end']}
 
-    new_event['id'] = event['id'].lstrip('_')
-
-    new_event['start'] = event['start']
-    new_event['end'] = event['end']
     if 'dateTime' in event['start']:
         event_start = dateutil.parser.parse(event['start']['dateTime'])
         event_end = dateutil.parser.parse(event['end']['dateTime'])
         time_diff = event_end - event_start
         if time_diff.seconds < 61:
             # Too short - set new event end time to start + 60 minutes
-            new_event_end = event_start + datetime.timedelta(0,3600)
+            new_event_end = event_start + datetime.timedelta(0, 3600)
             end_datetime = new_event_end.isoformat()
             new_event['end']['dateTime'] = end_datetime
     if 'summary' in event:
         new_event['summary'] = event['summary']
     if 'location' in event:
         new_event['location'] = event['location']
-    if 'description' in event:
-        new_event['description'] = event['description']
-        new_event['description'] = new_event['description'] + '\n\nSynced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
-    else:
-        new_event['description'] = 'Synced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
+    new_event['description'] = event.get('description', '')
+    new_event['description'] += f'\n\nSynced from {from_cal} by google-calendar-syncer.\nLast sync: {date_time_now}'
     if 'recurrence' in event:
         new_event['recurrence'] = event['recurrence']
     if 'reminders' in event:
@@ -316,7 +312,8 @@ def insert_into_calendar(service_client, from_cal, event, calendar, date_time_no
         try:
             response = service_client.events().insert(calendarId=calendar, body=new_event).execute()
             logging.info('         Event created: %s' % response['summary'])
-            logging.info("             Date/Time: %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
+            logging.info("             Date/Time: %s - %s" % (
+                parse_to_string(response['start']), parse_to_string(response['end'])))
         except Exception as e:
             logging.warning('         Exception inserting into calendar')
             if 'The requested identifier already exists' in str(e):
@@ -330,7 +327,8 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
     event_id = event['id'].lstrip('_')
     if not dryrun:
         try:
-            response = service_client.events().delete(calendarId=calendar, eventId=event_id, sendUpdates='all').execute()
+            response = service_client.events().delete(calendarId=calendar, eventId=event_id,
+                                                      sendUpdates='all').execute()
             logging.info('         Event deleted: %s' % str(event))
         except Exception as e:
             logging.error('Exception deleting event (%s) from calendar: %s' % (str(event), str(e)))
@@ -341,17 +339,13 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
 
 def update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun=False):
     event_id = event['id'].lstrip('_')
-    updated_event_body = {}
-    updated_event_body['start'] = event['start']
-    updated_event_body['end'] = event['end']
+    updated_event_body = {'start': event['start'], 'end': event['end']}
     if 'summary' in event:
         updated_event_body['summary'] = event['summary']
-    if 'description' in event:
-        updated_event_body['description'] = event['description']
-        if not 'Synced by google-calendar-syncer' in updated_event_body['description']:
-            updated_event_body['description'] = updated_event_body['description'] + '\n\nSynced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
-    else:
-        updated_event_body['description'] = 'Synced from %s by google-calendar-syncer on %s' % (from_cal, date_time_now)
+    updated_event_body['description'] = event.get('description', '')
+    if not 'Synced by google-calendar-syncer' in updated_event_body['description']:
+        updated_event_body['description'] += f'\n\nSynced from {from_cal} by google-calendar-syncer.'
+        updated_event_body['description'] += f'\nLast sync on {date_time_now}'
     if 'location' in event:
         updated_event_body['location'] = event['location']
     if 'recurrence' in event:
@@ -360,14 +354,16 @@ def update_event_in_calendar(service_client, from_cal, event, calendar, date_tim
         updated_event_body['reminders'] = event['reminders']
 
     if not dryrun:
-        response = service_client.events().update(calendarId=calendar, eventId=event_id, body=updated_event_body, sendUpdates='all').execute()
+        response = service_client.events().update(calendarId=calendar, eventId=event_id, body=updated_event_body,
+                                                  sendUpdates='all').execute()
         logging.info('Event updated: %s' % response['summary'])
         logging.info("      Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
     else:
         logging.info('Dryrun update event in calender(%s): %s' % (calendar, updated_event_body['summary']))
 
 
-def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, from_cal_cache, from_cal_events, to_cal, limit=0, dryrun=False):
+def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, from_cal_cache, from_cal_events, to_cal,
+                            limit=0, exclusions=None, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
@@ -405,23 +401,34 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
         #    events to insert - these will exist in from_cal_events, but not in cache
         #    events to update - these will exist in both cache and from_cal_events, with different updated times
         for from_event in from_cal_events:
-            found_in_cache = False
-            for cache_event in from_cal_cache:
-                if cache_event['id'].lstrip('_') == from_event['id'].lstrip('_'):
-                    # Found it - check the updated time
-                    found_in_cache = True
-                    from_event_updated_time = dateutil.parser.parse(from_event['updated'])
-                    cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
-                    time_diff = cache_event_updated_time - from_event_updated_time
-                    # if the from_event has a later updated time, we need to update the event
-                    if time_diff.days < 0:
-                        # Add this to the events_to_update list
-                        logging.debug('         Cache event with ID: %s should be updated' % cache_event['id'])
-                        events_to_update.append(from_event)
-            if not found_in_cache:
-                # Didn't find the event ID in the cached events - it must be new
-                logging.debug('         Calendar event with ID: %s should be inserted' % from_event['id'])
-                events_to_insert.append(from_event)
+            process_event = True
+            if exclusions:
+                exclude_by_summary_text = exclusions.get('summary')
+                event_summary = from_event.get('summary')
+                for exclude_text in exclude_by_summary_text:
+                    if exclude_text in event_summary:
+                        event_start = dateutil.parser.parse(from_event['start']['dateTime'])
+                        logging.warning(f'Skipping event with start time {event_start} due to exclusion match.\nMatched "{exclude_text}" in: {event_summary}')
+                        process_event = False
+                        break
+            if process_event:
+                found_in_cache = False
+                for cache_event in from_cal_cache:
+                    if cache_event['id'].lstrip('_') == from_event['id'].lstrip('_'):
+                        # Found it - check the updated time
+                        found_in_cache = True
+                        from_event_updated_time = dateutil.parser.parse(from_event['updated'])
+                        cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
+                        time_diff = cache_event_updated_time - from_event_updated_time
+                        # if the from_event has a later updated time, we need to update the event
+                        if time_diff.days < 0:
+                            # Add this to the events_to_update list
+                            logging.debug('         Cache event with ID: %s should be updated' % cache_event['id'])
+                            events_to_update.append(from_event)
+                if not found_in_cache:
+                    # Didn't find the event ID in the cached events - it must be new
+                    logging.debug('         Calendar event with ID: %s should be inserted' % from_event['id'])
+                    events_to_insert.append(from_event)
 
         if len(events_to_delete) == 0 and len(events_to_insert) == 0 and len(events_to_update) == 0:
             logging.info('      No changes found!')
@@ -450,8 +457,8 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
         to_calendar_events = get_events_for_calendar(last_sync, service_client, to_cal, limit)
         logging.debug('      Destination Calendar events:\n%s' % json.dumps(to_calendar_events, indent=4))
 
-        insert_count=0
-        update_count=0
+        insert_count = 0
+        update_count = 0
 
         # Need to loop through the from_cal_events and see if we can find a matching one in the to_calendar_events
         # If we can't find it, then we need to insert the event into the to_calendar
@@ -467,6 +474,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
                     time_diff = to_event_updated_time - from_event_updated_time
                     # if the from_event has a later updated time, we need to update the event
                     if time_diff.days < 0:
+                        logging.info('Found an event that needs to be updated (based on later updated time)')
                         # Need to update this event
                         update_event_in_calendar(service_client, from_cal, from_event, to_cal, date_time_now, dryrun)
                         update_count += 1
@@ -481,26 +489,36 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
             if insert_count > 0:
                 logging.info('      Inserted %s new events into calendar: %s' % (str(insert_count), to_cal))
             if update_count > 0:
-                logging.info('      Updated %s events in calendar: %s' % (str(insert_count), to_cal))
+                logging.info('      Updated %s events in calendar: %s' % (str(update_count), to_cal))
 
 
-def sync_events(service, time, config, cache=None, dryrun=False):
-    old_cache={}
-    new_cache={}
+def sync_events(service_client, time, config, cache=None, dryrun=False):
+    old_cache = {}
+    new_cache = {}
     for item in config:
         logging.info('Processing %s' % item)
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
+        exclusions = config[item].get('exclusions', None)
         for src_cal in source_cals:
             logging.info('   Syncing events from %s' % src_cal)
             src_cal_id = source_cals[src_cal]
-            src_cal_events = get_events_for_calendar(time, service, src_cal_id, 0)
+            src_cal_events = get_events_for_calendar(time, service_client, src_cal_id, 0)
             logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
             src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
-            sync_events_to_calendar(service, time, src_cal, src_cal_id, src_cal_cache, src_cal_events, dest_cal_id, 0, dryrun)
+            sync_events_to_calendar(service_client,
+                                    time,
+                                    src_cal,
+                                    src_cal_id,
+                                    src_cal_cache,
+                                    src_cal_events,
+                                    dest_cal_id,
+                                    0,
+                                    exclusions,
+                                    dryrun)
             old_cache[src_cal_id] = src_cal_cache
             new_cache[src_cal_id] = src_cal_events
-    return (old_cache, new_cache)
+    return old_cache, new_cache
 
 
 def lambda_handler(event, context):
@@ -562,11 +580,11 @@ def lambda_handler(event, context):
         # no last sync time can be found - use the time NOW - only look at event from this point forward
         last_sync_time = now
 
-    service = authorize(storage_path)
+    service_client = authorize(storage_path)
 
     logging.debug("STARTING RUN")
 
-    old_cache, new_cache = sync_events(service, last_sync_time, config, cache, dryrun=dryrun)
+    old_cache, new_cache = sync_events(service_client, last_sync_time, config, cache, dryrun=dryrun)
 
     if not dryrun:
         # Udpate the cache
@@ -586,11 +604,10 @@ def lambda_handler(event, context):
     else:
         _put_file_to_s3(s3_client, bucket, token_key, token_path)
 
-    logging.info ('Cleaning up...')
+    logging.info('Cleaning up...')
     shutil.rmtree(storage_path)
     logging.info("DONE")
     return True
-
 
 if __name__ == "__main__":
     LOG_FILENAME = 'google-calendar-syncer.log'
@@ -605,7 +622,8 @@ if __name__ == "__main__":
     parser.add_argument("--region", help="AWS region S3 bucket is in", dest='region', required=True)
     parser.add_argument("--cleanup", help="Clean up temp folder after exection", action='store_true')
     parser.add_argument("--verbose", help="Turn on DEBUG logging", action='store_true')
-    parser.add_argument("--dryrun", help="Do a dryrun - no changes will be performed", dest='dryrun',action='store_true', default=False)
+    parser.add_argument("--dryrun", help="Do a dryrun - no changes will be performed", dest='dryrun',
+                        action='store_true', default=False)
     args = parser.parse_args()
 
     log_level = logging.INFO
@@ -708,12 +726,12 @@ if __name__ == "__main__":
     else:
         # Single source and destination calendar provided
         config = {
-            "Destination Calendar" : {
-                "destination_cal_id" : args.dst_cal_id,
-                "source_cals" : [
+            "Destination Calendar": {
+                "destination_cal_id": args.dst_cal_id,
+                "source_cals": [
                     {
-                        "name" : "Source Calendar",
-                        "cal_id" : args.src_cal_id
+                        "name": "Source Calendar",
+                        "cal_id": args.src_cal_id
                     }
                 ]
             }
@@ -749,7 +767,7 @@ if __name__ == "__main__":
         logging.info('DRYRUN - cache contents:\n%s' % json.dumps(new_cache, indent=4))
 
     if args.cleanup:
-        logging.info ('Cleaning up...')
+        logging.info('Cleaning up...')
         shutil.rmtree(storage_path)
 
     logging.info("DONE")
