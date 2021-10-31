@@ -34,11 +34,15 @@ Config file is a json document with the following info:
 ```json
 {
   "Destination Calendar 1" : {
-    "destination_cal_id" : "<destination_calendar_id>",
-    "source_cals" : 
-      {
-        "Source Calendar Name": "<source_calendar_id>"
-      }
+    "destination_cal_id": "<destination_calendar_id>",
+    "source_cals": {
+      "Source Calendar Name": "<source_calendar_id>"
+    },
+    "exclusions": {
+      "summary": [
+        "Summary Exclusion Text"
+      ]
+    }
   },
   "Destination Calendar 2" : {
     "destination_cal_id" : "<destination_calendar_id>",
@@ -75,55 +79,41 @@ The cloudformation template that will be used to deploy the scheduled lambda doe
 where the credential files and cache will live. That bucket should be created prior to deploying the lambda.
 
 In addition to creating the S3 bucket, the required credential files (token.json and credentials.json) should also be
-generated. This can be accomplished by runnging the script once manually, using the --init option. The files should be
-created in the same directory that the script is run from. Once created, upload these files to the S3 bucket.
+generated. This can be accomplished by running the script once manually, using the --init option. The files should be
+created in the same directory that the script is run from. Once created, upload these files to the config S3 bucket.
 
 eg.
 ```bash
 python google-calendar-syncer.py --init
 ```
 
-In addition to creating the credential files and uploading them to the S3 bucket, there is an additional step required
-to create the google-calendar-syncer.zip file that contains the python script, and all the required modules. Included in
-this repo is a Dockerfile that will handle the creation of the required zip file. Perform the following steps:
+Build and Deploy is accomplished using [AWS SAM](https://github.com/awslabs/serverless-application-model).
 
-1) ```docker build -f Dockerfile-build . -t google-calendar-syncer-zip```
-2) ```docker run --name build-output google-calendar-syncer-zip```
-3) ```docker cp build-output:/package/google-calendar-syncer.zip .```
-4) ```docker rm -v build-output```
+1) ```sam build --use-container```
+2) ```sam deploy```
 
-Alternatively, if docker isn't installed on your system, you can run the steps manually:
-
-1) ```mkdir package```
-2) ```cd package```
-3) ```pip install -r ../requirements.txt --target .```
-4) ```zip -r9 ../google-calendar-syncer.zip .```
-5) ```cd ..```
-6) ```zip -g google-calendar-syncer.zip google-calendar-syncer.py```
-
-At this point, we are ready to package everything up using [AWS SAM](https://github.com/awslabs/serverless-application-model)
-and deploy via 2 simple SAM commands as follows:
+Note: You can create a `samconfig.toml` file to eliminate the need to input anything for the deploy, eg.
 
 ```
-aws cloudformation package \
-    --template-file template.yaml \
-    --s3-bucket <a bucket to store lambda function code in> \
-    --output-template-file packaged-template.yaml \
-    --profile <your AWS CLI profile>
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "google-calendar-syncer"
+s3_bucket = "<lambda-deploy-bucket>"
+s3_prefix = "google-calendar-syncer"
+region = "<aws-region>"
+confirm_changeset = false
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = [
+  "Debug=false",
+  "UseS3=false",
+  "UseDynamoDB=true",
+  "Schedule='rate(10 minutes)'"
+]
 ```
-The above command will upload the lambda function to S3 and modify the `template.yaml` file to point to the uploaded function,
-producing a `packaged-template.yaml` file
 
-```
-aws cloudformation deploy \
-    --capabilities CAPABILITY_IAM \
-    --template-file ./packaged-template.yaml \
-    --stack-name <MY STACK NAME> \
-    --parameter-overrides "S3Bucket=<bucket_name>" "Schedule=<schedule_expression>" \
-    --profile <Your AWS CLI profile> \
-    --region <region to create the stack in>
-```
-The above command will create or update a cloudformation stack
+Running the deploy will create or update a cloudformation stack.
 
 ####Note:
 - the bucket_name referenced above will likely be a *different* bucket than was used during the package step above

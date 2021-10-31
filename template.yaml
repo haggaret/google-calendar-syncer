@@ -33,88 +33,46 @@ Conditions:
   CreateTable: !Equals [ !Ref UseDynamoDB, "true" ]
 
 Resources:
-  ExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: GoogleCalendarSyncerExecutionRole
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          -
-            Effect: "Allow"
-            Principal:
-              Service:
-                - "lambda.amazonaws.com"
-            Action:
-              - "sts:AssumeRole"
-      Path: /
-      Policies:
-        -
-          PolicyName: "GoogleCalendarSyncerStorageAccessPolicy"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              # Cloudwatch logs for the function
-              -
-                Effect: "Allow"
-                Action:
-                  - "logs:CreateLogGroup"
-                  - "logs:CreateLogStream"
-                  - "logs:PutLogEvents"
-                  - "logs:DescribeLogStreams"
-                Resource:
-                  - "*"
-              # S3
-              -
-                Effect: "Allow"
-                Action:
-                  - "s3:*"
-                Resource:
-                  - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer']]
-                  - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer/*']]
-              # DynamoDB
-              -
-                Effect: "Allow"
-                Action:
-                  - "dynamodb:*"
-                Resource:
-                  - !Join ['', ['arn:aws:dynamodb:', !Ref "AWS::Region", ':', !Ref "AWS::AccountId", ':table/GoogleCalendarSyncer']]
-
   GoogleCalendarSyncer:
     Type: 'AWS::Serverless::Function'
     Properties:
       FunctionName: GoogleCalendarSyncer
+      CodeUri: src/
       Handler: google-calendar-syncer.lambda_handler
-      Runtime: python3.6
-      CodeUri: ./google-calendar-syncer.zip
+      Runtime: python3.8
+#      CodeUri: ./google-calendar-syncer.zip
       Description: Lambda function to sync source google calendar(s) to desitination calendar
       MemorySize: 128
       Timeout: 300
-      Role: !GetAtt ExecutionRole.Arn
       Environment:
         Variables:
           DEBUG: !Ref Debug
           S3_BUCKET: !If [CreateBucket, !Join ['', [!Ref "AWS::AccountId", '-GoogleCalendarSyncer']], !Ref "AWS::NoValue"]
           DYNAMODB_TABLE: !If [CreateTable, "GoogleCalendarSyncer", !Ref "AWS::NoValue"]
-
-  LambdaScheduledRule:
-    Type: "AWS::Events::Rule"
-    Properties:
-      Description: "Run google-calendar-syncer using the given schedule"
-      ScheduleExpression: !Ref Schedule
-      State: "ENABLED"
-      Targets:
-        -
-          Arn: !GetAtt GoogleCalendarSyncer.Arn
-          Id: "google_calendar_syncer"
-
-  LambdaInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt LambdaScheduledRule.Arn
-      FunctionName: !GetAtt GoogleCalendarSyncer.Arn
+      Events:
+        PeriodicRun:
+          Type: Schedule
+          Properties:
+            # Run at given schedule
+            Schedule: !Ref Schedule
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+              # S3
+            -
+              Effect: "Allow"
+              Action:
+                - "s3:*"
+              Resource:
+                - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer']]
+                - !Join ['', ['arn:aws:s3:::', !Ref "AWS::AccountId", '-GoogleCalendarSyncer/*']]
+            # DynamoDB
+            -
+              Effect: "Allow"
+              Action:
+                - "dynamodb:*"
+              Resource:
+                - !Join ['', ['arn:aws:dynamodb:', !Ref "AWS::Region", ':', !Ref "AWS::AccountId", ':table/GoogleCalendarSyncer']]
 
   S3Bucket:
     Condition: CreateBucket

@@ -7,3 +7,4 @@
 **/config.json
 packaged-template.yaml
 google-calendar-syncer.zip
+.aws-sam
