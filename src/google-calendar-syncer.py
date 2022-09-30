@@ -310,12 +310,13 @@ def insert_into_calendar(service_client, from_cal, event, calendar, date_time_no
         new_event['reminders'] = event['reminders']
     if not dryrun:
         try:
+            logging.info(f'Attempting to insert the following event: {new_event}')
             response = service_client.events().insert(calendarId=calendar, body=new_event).execute()
             logging.info('         Event created: %s' % response['summary'])
             logging.info("             Date/Time: %s - %s" % (
                 parse_to_string(response['start']), parse_to_string(response['end'])))
         except Exception as e:
-            logging.warning('         Exception inserting into calendar')
+            logging.warning('         Exception inserting into calendar:', e)
             if 'The requested identifier already exists' in str(e):
                 logging.info('         Requested ID already exists - try updating instead...')
                 update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun)
