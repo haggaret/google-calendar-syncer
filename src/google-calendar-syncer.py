@@ -87,7 +87,7 @@ def parse_to_string(obj_to_parse):
         # This is a datetime string like this: 2019-01-11T18:30:16-05:00
         return_date = obj_to_parse['dateTime'].split('T')[0]
         return_time = obj_to_parse['dateTime'].split('T')[1].split('-')[0]
-        result_str = '%s at %s' % (return_date, return_time)
+        result_str = f'{return_date} at {return_time}'
     else:
         # Assume date
         result_str = obj_to_parse['date']
@@ -101,7 +101,7 @@ def parse_to_string(obj_to_parse):
         # This is a datetime string like this: 2019-01-11T18:30:16-05:00
         return_date = obj_to_parse['dateTime'].split('T')[0]
         return_time = obj_to_parse['dateTime'].split('T')[1].split('-')[0]
-        result_str = '%s at %s' % (return_date, return_time)
+        result_str = f'{return_date} at {return_time}'
     else:
         # Assume date
         result_str = obj_to_parse['date']
@@ -110,34 +110,34 @@ def parse_to_string(obj_to_parse):
 
 def _load_creds_from_s3(s3_client, s3_bucket, storage_path):
     # Grab the oauth creds and cache from S3
-    logging.info('Using temp dir: %s for temp storage' % storage_path)
+    logging.info(f'Using temp dir: {storage_path} for temp storage')
     logging.info('Getting token.json')
     token_contents = _get_from_s3(s3_client, s3_bucket, 'token.json')
     token_path = storage_path + os.sep + 'token.json'
-    logging.info('Writing token.json to temp dir: %s' % storage_path)
+    logging.info(f'Writing token.json to temp dir: {storage_path}')
     with open(token_path, 'wb') as f:
         f.write(token_contents)
     logging.info('Getting credentials.json')
     creds_contents = _get_from_s3(s3_client, s3_bucket, 'credentials.json')
     creds_path = storage_path + os.sep + 'credentials.json'
-    logging.info('Writing credentials.json to temp dir: %s' % storage_path)
+    logging.info(f'Writing credentials.json to temp dir: {storage_path}')
     with open(creds_path, 'wb') as f:
         f.write(creds_contents)
 
 
 def _load_creds_from_dynamodb(table_client, storage_path):
     # Grab the oauth creds from DynamoDB
-    logging.info('Using temp dir: %s for temp storage' % storage_path)
+    logging.info(f'Using temp dir: {storage_path} for temp storage')
     logging.info('Getting token.json')
     token_contents = _get_from_dynamodb(table_client, 'token', 'jsonData')
     token_path = storage_path + os.sep + 'token.json'
-    logging.info('Writing token.json to temp dir: %s' % storage_path)
+    logging.info(f'Writing token.json to temp dir: {storage_path}')
     with open(token_path, 'w') as f:
         f.write(token_contents)
     logging.info('Getting credentials.json')
     creds_contents = _get_from_dynamodb(table_client, 'credentials', 'jsonData')
     creds_path = storage_path + os.sep + 'credentials.json'
-    logging.info('Writing credentials.json to temp dir: %s' % storage_path)
+    logging.info(f'Writing credentials.json to temp dir: {storage_path}')
     with open(creds_path, 'w') as f:
         f.write(creds_contents)
 
@@ -209,12 +209,12 @@ def _update_local_calendar_cache(storage_path, new_cache, old_cache):
         os.makedirs(cache_path)
     for cal in new_cache:
         cache_file_path = cache_path + os.sep + cal + '.cache'
-        logging.info('Writing cache file to: %s' % cache_file_path)
+        logging.info(f'Writing cache file to: {cache_file_path}')
         with open(cache_file_path, 'wb') as f:
             f.write(json.dumps(new_cache[cal], indent=4))
     for cal in old_cache:
         cache_file_path = cache_path + os.sep + cal + '.cache.old'
-        logging.info('Writing cache file to: %s' % cache_file_path)
+        logging.info(f'Writing cache file to: {cache_file_path}')
         with open(cache_file_path, 'wb') as f:
             f.write(json.dumps(new_cache[cal], indent=4))
 
@@ -268,14 +268,14 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
     if limit != 0:
         max_results = limit
 
-    logging.debug('      Getting events from calendar with ID: %s ' % calendar_id)
+    logging.debug(f'      Getting events from calendar with ID: {calendar_id}')
     response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
                                             singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
     events = response.get('items', [])
     all_events.extend(events)
 
     while 'nextSyncToken' in response:
-        logging.debug('Getting more events from calendar ID: %s ' % calendar_id)
+        logging.debug(f'Getting more events from calendar ID: {calendar_id}')
         response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
                                                 syncToken=response['nextSyncToken'],
                                                 singleEvents=True, orderBy='startTime',
@@ -312,16 +312,16 @@ def insert_into_calendar(service_client, from_cal, event, calendar, date_time_no
         try:
             logging.info(f'Attempting to insert the following event: {new_event}')
             response = service_client.events().insert(calendarId=calendar, body=new_event).execute()
-            logging.info('         Event created: %s' % response['summary'])
+            logging.info(f"         Event created: {response['summary']}")
             logging.info("             Date/Time: %s - %s" % (
                 parse_to_string(response['start']), parse_to_string(response['end'])))
         except Exception as e:
-            logging.warning('         Exception inserting into calendar:', e)
+            logging.warning('         Exception inserting into calendar:', str(e))
             if 'The requested identifier already exists' in str(e):
                 logging.info('         Requested ID already exists - try updating instead...')
                 update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun)
     else:
-        logging.info('         Dryrun insert event into calendar(%s): %s' % (calendar, new_event['summary']))
+        logging.info(f"         Dryrun insert event into calendar({calendar}): {new_event['summary']}")
 
 
 def delete_from_calendar(service_client, event, calendar, dryrun=False):
@@ -330,12 +330,13 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
         try:
             response = service_client.events().delete(calendarId=calendar, eventId=event_id,
                                                       sendUpdates='all').execute()
-            logging.info('         Event deleted: %s' % str(event))
+            logging.debug(f'Response: {response}')
+            logging.info(f'         Event deleted: {str(event)}')
         except Exception as e:
-            logging.error('Exception deleting event (%s) from calendar: %s' % (str(event), str(e)))
+            logging.error(f'Exception deleting event ({str(event)}) from calendar: {str(e)}')
 
     else:
-        logging.info('         Dryrun delete event from calendar(%s): %s' % (calendar, event['summary']))
+        logging.info(f"         Dryrun delete event from calendar({calendar}): {event['summary']}")
 
 
 def update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun=False):
@@ -357,10 +358,10 @@ def update_event_in_calendar(service_client, from_cal, event, calendar, date_tim
     if not dryrun:
         response = service_client.events().update(calendarId=calendar, eventId=event_id, body=updated_event_body,
                                                   sendUpdates='all').execute()
-        logging.info('Event updated: %s' % response['summary'])
-        logging.info("      Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
+        logging.info(f"Event updated: {response['summary']}")
+        logging.info(f"      Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
     else:
-        logging.info('Dryrun update event in calender(%s): %s' % (calendar, updated_event_body['summary']))
+        logging.info(f"Dryrun update event in calender({calendar}): {updated_event_body['summary']}")
 
 
 def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, from_cal_cache, from_cal_events, to_cal,
@@ -370,8 +371,8 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
     events_to_update = []
     date_time_now = datetime.datetime.utcnow().isoformat() + 'Z'
     if from_cal_cache:
-        logging.debug('      Found a cache for the source calendar with ID: %s' % from_cal_id)
-        logging.debug('      Cached Calendar events:\n%s' % json.dumps(from_cal_cache, indent=4))
+        logging.debug(f'      Found a cache for the source calendar with ID: {from_cal_id}')
+        logging.debug(f'      Cached Calendar events:\n{json.dumps(from_cal_cache, indent=4)}')
         # First find events to delete - these will exist in cache, but not in from_cal_events
         logging.debug('      Comparing cached events against Source calendar events')
         for cache_event in from_cal_cache:
@@ -388,14 +389,14 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
                     start_time = dateutil.parser.parse(cache_event['start']['dateTime'])
                     time_diff = start_time - last_sync_time
                     if not (time_diff.days < 0):
-                        logging.debug('         Cache event with ID: %s should be deleted' % cache_event['id'])
+                        logging.debug(f"         Cache event with ID: {cache_event['id']} should be deleted")
                         events_to_delete.append(cache_event)
                 elif 'date' in cache_event['start']:
                     # all day event
                     start_day = cache_event['start']['date']
                     today = datetime.date.today().isoformat()
                     if start_day > today:
-                        logging.debug('         Cache event with ID: %s should be deleted' % cache_event['id'])
+                        logging.debug(f"         Cache event with ID: {cache_event['id']} should be deleted")
                         events_to_delete.append(cache_event)
 
         # Now find:
@@ -424,11 +425,11 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
                         # if the from_event has a later updated time, we need to update the event
                         if time_diff.days < 0:
                             # Add this to the events_to_update list
-                            logging.debug('         Cache event with ID: %s should be updated' % cache_event['id'])
+                            logging.debug(f"         Cache event with ID: {cache_event['id']} should be updated")
                             events_to_update.append(from_event)
                 if not found_in_cache:
                     # Didn't find the event ID in the cached events - it must be new
-                    logging.debug('         Calendar event with ID: %s should be inserted' % from_event['id'])
+                    logging.debug(f"         Calendar event with ID: {from_event['id']} should be inserted")
                     events_to_insert.append(from_event)
 
         if len(events_to_delete) == 0 and len(events_to_insert) == 0 and len(events_to_update) == 0:
@@ -454,9 +455,9 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
     else:
         # No cache present - need to get events from the destination calendar and compare
         logging.debug('      No cache present - need to get events from destination calendar for comparison')
-        logging.debug('      Getting all events for destination calendar with ID: %s' % to_cal)
+        logging.debug(f'      Getting all events for destination calendar with ID: {to_cal}')
         to_calendar_events = get_events_for_calendar(last_sync, service_client, to_cal, limit)
-        logging.debug('      Destination Calendar events:\n%s' % json.dumps(to_calendar_events, indent=4))
+        logging.debug(f'      Destination Calendar events:\n{json.dumps(to_calendar_events, indent=4)}')
 
         insert_count = 0
         update_count = 0
@@ -488,24 +489,24 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
             logging.info('No changes found!')
         else:
             if insert_count > 0:
-                logging.info('      Inserted %s new events into calendar: %s' % (str(insert_count), to_cal))
+                logging.info(f'      Inserted {str(insert_count)} new events into calendar: {to_cal}')
             if update_count > 0:
-                logging.info('      Updated %s events in calendar: %s' % (str(update_count), to_cal))
+                logging.info(f'      Updated {str(update_count)} events in calendar: {to_cal}')
 
 
 def sync_events(service_client, time, config, cache=None, dryrun=False):
     old_cache = {}
     new_cache = {}
     for item in config:
-        logging.info('Processing %s' % item)
+        logging.info(f'Processing {item}')
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
         exclusions = config[item].get('exclusions', None)
         for src_cal in source_cals:
-            logging.info('   Syncing events from %s' % src_cal)
+            logging.info(f'   Syncing events from {src_cal}')
             src_cal_id = source_cals[src_cal]
             src_cal_events = get_events_for_calendar(time, service_client, src_cal_id, 0)
-            logging.debug('      Source Calendar events:\n%s' % json.dumps(src_cal_events, indent=4))
+            logging.debug(f'      Source Calendar events:\n{json.dumps(src_cal_events, indent=4)}')
             src_cal_cache = (cache[src_cal_id] if cache and src_cal_id in cache else None)
             sync_events_to_calendar(service_client,
                                     time,
@@ -709,7 +710,7 @@ if __name__ == "__main__":
             _load_creds_from_dynamodb(table_client, storage_path)
             # Get the cache
             cache = _load_dynamodb_calendar_cache(table_client)
-            logging.debug('Cache: %s' % json.dumps(cache, indent=4))
+            logging.debug(f'Cache: {json.dumps(cache, indent=4)}')
             last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
         else:
             # Local config file
@@ -718,7 +719,7 @@ if __name__ == "__main__":
                 with open(args.config, 'r') as f:
                     config = json.loads(f.read())
             else:
-                logging.error("Config file doesn't exist at given path: %s" % args.config)
+                logging.error(f"Config file doesn't exist at given path: {args.config}")
                 exit(1)
             cache_path = os.path.join(storage_path, 'cache')
             if os.path.exists(cache_path):
@@ -765,7 +766,7 @@ if __name__ == "__main__":
         else:
             _update_local_calendar_cache(storage_path, new_cache, old_cache)
     else:
-        logging.info('DRYRUN - cache contents:\n%s' % json.dumps(new_cache, indent=4))
+        logging.info(f'DRYRUN - cache contents:\n{json.dumps(new_cache, indent=4)}')
 
     if args.cleanup:
         logging.info('Cleaning up...')
