@@ -316,7 +316,7 @@ def insert_into_calendar(service_client, from_cal, event, calendar, date_time_no
             logging.info("             Date/Time: %s - %s" % (
                 parse_to_string(response['start']), parse_to_string(response['end'])))
         except Exception as e:
-            logging.warning('         Exception inserting into calendar:', str(e))
+            logging.warning(f'         Exception inserting into calendar: {e}')
             if 'The requested identifier already exists' in str(e):
                 logging.info('         Requested ID already exists - try updating instead...')
                 update_event_in_calendar(service_client, from_cal, event, calendar, date_time_now, dryrun)
@@ -345,7 +345,7 @@ def update_event_in_calendar(service_client, from_cal, event, calendar, date_tim
     if 'summary' in event:
         updated_event_body['summary'] = event['summary']
     updated_event_body['description'] = event.get('description', '')
-    if not 'Synced by google-calendar-syncer' in updated_event_body['description']:
+    if 'Synced by google-calendar-syncer' not in updated_event_body['description']:
         updated_event_body['description'] += f'\n\nSynced from {from_cal} by google-calendar-syncer.'
         updated_event_body['description'] += f'\nLast sync on {date_time_now}'
     if 'location' in event:
@@ -356,10 +356,13 @@ def update_event_in_calendar(service_client, from_cal, event, calendar, date_tim
         updated_event_body['reminders'] = event['reminders']
 
     if not dryrun:
-        response = service_client.events().update(calendarId=calendar, eventId=event_id, body=updated_event_body,
+        try:
+            response = service_client.events().update(calendarId=calendar, eventId=event_id, body=updated_event_body,
                                                   sendUpdates='all').execute()
-        logging.info(f"Event updated: {response['summary']}")
-        logging.info(f"      Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
+            logging.info(f"Event updated: {response['summary']}")
+            logging.info(f"      Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
+        except Exception as e:
+            logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
     else:
         logging.info(f"Dryrun update event in calender({calendar}): {updated_event_body['summary']}")
 
@@ -449,6 +452,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
 
             if len(events_to_update) > 0:
                 logging.info('      Found some events that need updating')
+                logging.debug(f'{events_to_update}')
                 # Update events that need updating
                 for update_event in events_to_update:
                     update_event_in_calendar(service_client, from_cal, update_event, to_cal, date_time_now, dryrun)
