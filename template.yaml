@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: 'AWS::Serverless-2016-10-31'
-Description: Lambda function to sync source google calendar(s) to desitination calendar
+Description: Lambda function to sync source google calendar(s) to destination calendar
 
 Parameters:
   Debug:
