@@ -4,3 +4,6 @@ google-api-python-client
 oauth2client
 bs4
 icalendar
+ics
+pytz
+requests
