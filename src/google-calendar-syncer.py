@@ -269,19 +269,22 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
         max_results = limit
 
     logging.debug(f'      Getting events from calendar with ID: {calendar_id}')
-    response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
-                                            singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
-    events = response.get('items', [])
-    all_events.extend(events)
-
-    while 'nextSyncToken' in response:
-        logging.debug(f'Getting more events from calendar ID: {calendar_id}')
+    try:
         response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
-                                                syncToken=response['nextSyncToken'],
-                                                singleEvents=True, orderBy='startTime',
-                                                maxResults=max_results).execute()
+                                                singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
         events = response.get('items', [])
         all_events.extend(events)
+
+        while 'nextSyncToken' in response:
+            logging.debug(f'Getting more events from calendar ID: {calendar_id}')
+            response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
+                                                    syncToken=response['nextSyncToken'],
+                                                    singleEvents=True, orderBy='startTime',
+                                                    maxResults=max_results).execute()
+            events = response.get('items', [])
+            all_events.extend(events)
+    except:
+        logging.error(f'Exception fetching events from calendar with ID: {calendar_id}')
 
     return all_events
 
