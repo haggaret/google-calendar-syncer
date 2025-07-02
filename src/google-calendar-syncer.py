@@ -261,7 +261,7 @@ def _update_last_sync_time_in_s3(s3_client, bucket, sync_time):
     _put_obj_to_s3(s3_client, bucket, 'last_sync', sync_time)
 
 
-def _should_be_excluded(event, exclusions=None):
+def _should_be_excluded(event, exclusions=None, filters=None):
     result = False
     if exclusions:
         exclude_by_summary_text = exclusions.get('summary')
@@ -273,6 +273,25 @@ def _should_be_excluded(event, exclusions=None):
                               f'match. Matched "{exclude_text}" in: {event_summary}')
                 result = True
                 break
+    if not result:
+        if filters:
+            # Currently only supporting filter by title
+            filter_by_title = filters.get('title', None)
+            if filter_by_title:
+                contains_filter = filter_by_title.get('contains', [])
+                event_title = event.get('title')
+                found_contains_filter_text = False
+                for filter_text in contains_filter:
+                    if filter_text in event_title:
+                        # Found the contains filter text in the title - break out of loop
+                        found_contains_filter_text = True
+                        break
+                if not found_contains_filter_text:
+                    logging.debug(f'Skipping event with title {event_title} because it does NOT contain '
+                                  f'the text in the given contains filter "{contains_filter}"')
+                    result = True
+            # TODO: Filter by summary
+            # filter_by_summary = filters.get('summary', None)
     return result
 
 
@@ -284,19 +303,22 @@ def get_events_for_calendar(starting_datetime, service_client, calendar_id, limi
         max_results = limit
 
     logging.debug(f'      Getting events from calendar with ID: {calendar_id}')
-    response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
-                                            singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
-    events = response.get('items', [])
-    all_events.extend(events)
-
-    while 'nextSyncToken' in response:
-        logging.debug(f'Getting more events from calendar ID: {calendar_id}')
+    try:
         response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
-                                                syncToken=response['nextSyncToken'],
-                                                singleEvents=True, orderBy='startTime',
-                                                maxResults=max_results).execute()
+                                                singleEvents=True, orderBy='startTime', maxResults=max_results).execute()
         events = response.get('items', [])
         all_events.extend(events)
+
+        while 'nextSyncToken' in response:
+            logging.debug(f'Getting more events from calendar ID: {calendar_id}')
+            response = service_client.events().list(calendarId=calendar_id, timeMin=starting_datetime,
+                                                    syncToken=response['nextSyncToken'],
+                                                    singleEvents=True, orderBy='startTime',
+                                                    maxResults=max_results).execute()
+            events = response.get('items', [])
+            all_events.extend(events)
+    except:
+        logging.error(f'Exception fetching events from calendar with ID: {calendar_id}')
 
     return all_events
 
@@ -546,7 +568,7 @@ def get_updated_description(event_description, from_cal_name, sync_time, cached_
 
 
 def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_cache, from_cal_events, to_cal,
-                            limit=0, exclusions=None, dryrun=False):
+                            limit=0, exclusions=None, filters=None, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
@@ -560,7 +582,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
         # find events to delete - these will exist in from_cal_cache, but not in from_cal_events
         for cache_event in from_cal_cache:
             # Ignore any exclusion matches
-            if _should_be_excluded(cache_event, exclusions):
+            if _should_be_excluded(cache_event, exclusions, filters):
                 skipped_due_to_exclusion_match += 1
             else:
                 found_in_from = False
@@ -578,7 +600,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
         #    events to update - these will exist in both cache and from_cal_events, with different updated times
         for from_event in from_cal_events:
             # Ignore any exclusion matches
-            if _should_be_excluded(from_event, exclusions):
+            if _should_be_excluded(from_event, exclusions, filters):
                 skipped_due_to_exclusion_match += 1
             else:
                 found_in_cache = False
@@ -627,7 +649,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
         # Need to loop through the from_cal_events and see if we can find a matching one in the to_calendar_events
         # If we can't find it, then we need to insert the event into the to_calendar
         for from_event in from_cal_events:
-            if _should_be_excluded(from_event, exclusions):
+            if _should_be_excluded(from_event, exclusions, filters):
                 skipped_due_to_exclusion_match += 1
             else:
                 event_description = from_event.get('description', '')
@@ -739,6 +761,7 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
         exclusions = config[item].get('exclusions', None)
+        filters = config[item].get('filters', None)
         for src_cal_type in source_cals:
             for src_cal in source_cals[src_cal_type]:
                 if 'ics' in src_cal_type:
@@ -774,6 +797,7 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
                                                                dest_cal_id,
                                                                0,
                                                                exclusions,
+                                                               filters,
                                                                dryrun)
                 old_cache[cal_name] = (cache[cal_name] if cache and cal_name in cache else None)
                 # Remove any canceled events from src_cal_event before writing to cache
