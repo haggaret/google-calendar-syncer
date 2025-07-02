@@ -412,15 +412,20 @@ def insert_into_calendar(service_client, event, calendar, dryrun=False):
     result = True
     new_event_id = _get_gcal_event_id(event['id'])
     new_event = {'id': new_event_id, 'start': event['start'], 'end': event['end'], 'description': event['description']}
+    duration_adjusted = False
     if 'dateTime' in event['start']:
         event_start = dateutil.parser.parse(event['start']['dateTime'])
         event_end = dateutil.parser.parse(event['end']['dateTime'])
         time_diff = event_end - event_start
-        if time_diff.seconds < 61:
+        logging.debug(f'Event duration: {time_diff}')
+        if time_diff.days == 0 and time_diff.seconds < 61:
             # Too short - set new event end time to start + 60 minutes
+            logging.warning(f'Event duration: {time_diff}')
+            logging.warning(f'Determined event duration to be too short - lengthening to 60 minutes')
             new_event_end = event_start + datetime.timedelta(0, 3600)
             end_datetime = new_event_end.isoformat()
             new_event['end']['dateTime'] = end_datetime
+            duration_adjusted = True
     if 'summary' in event:
         new_event['summary'] = event['summary']
     if 'location' in event:
@@ -445,6 +450,8 @@ def insert_into_calendar(service_client, event, calendar, dryrun=False):
                 result = update_event_in_calendar(service_client, event, calendar, dryrun)
     else:
         logging.info(f"Dryrun insert event into calendar({calendar}): {new_event}")
+    if duration_adjusted:
+        logging.info("NOTE: For the above event - the duration was adjusted")
     return result
 
 
