@@ -371,7 +371,7 @@ def update_event_in_calendar(service_client, from_cal, event, calendar, date_tim
 
 
 def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, from_cal_cache, from_cal_events, to_cal,
-                            limit=0, exclusions=None, dryrun=False):
+                            limit=0, exclusions=None, filters=None, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
@@ -419,6 +419,22 @@ def sync_events_to_calendar(service_client, last_sync, from_cal, from_cal_id, fr
                         logging.warning(f'Skipping event with start time {event_start} due to exclusion match.\nMatched "{exclude_text}" in: {event_summary}')
                         process_event = False
                         break
+            if filters:
+                # Currently only supporting filter by title
+                filter_by_title = filters.get('title', None)
+                if filter_by_title:
+                    contains_filter = filter_by_title.get('contains', [])
+                    event_title = from_event.get('title')
+                    found_contains_filter_text = False
+                    for filter_text in contains_filter:
+                        if filter_text in event_title:
+                            # Found the contains filter text in the title - break out of loop
+                            found_contains_filter_text = True
+                            break
+                    if not found_contains_filter_text:
+                        process_event = False
+                # TODO: Filter by summary
+                # filter_by_summary = filters.get('summary', None)
             if process_event:
                 found_in_cache = False
                 for cache_event in from_cal_cache:
@@ -509,6 +525,7 @@ def sync_events(service_client, time, config, cache=None, dryrun=False):
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
         exclusions = config[item].get('exclusions', None)
+        filters = config[item].get('filters', None)
         for src_cal in source_cals:
             logging.info(f'   Syncing events from {src_cal}')
             src_cal_id = source_cals[src_cal]
@@ -524,6 +541,7 @@ def sync_events(service_client, time, config, cache=None, dryrun=False):
                                     dest_cal_id,
                                     0,
                                     exclusions,
+                                    filters,
                                     dryrun)
             old_cache[src_cal_id] = src_cal_cache
             new_cache[src_cal_id] = src_cal_events
