@@ -275,23 +275,21 @@ def _should_be_excluded(event, exclusions=None, filters=None):
                 break
     if not result:
         if filters:
-            # Currently only supporting filter by title
-            filter_by_title = filters.get('title', None)
-            if filter_by_title:
-                contains_filter = filter_by_title.get('contains', [])
-                event_title = event.get('title')
+            # Currently only supporting filter by summary
+            filter_by_summary = filters.get('summary', None)
+            if filter_by_summary:
+                contains_filter = filter_by_summary.get('contains', [])
+                event_summary = event.get('summary')
                 found_contains_filter_text = False
                 for filter_text in contains_filter:
-                    if filter_text in event_title:
-                        # Found the contains filter text in the title - break out of loop
+                    if filter_text in event_summary:
+                        # Found the contains filter text in the summary - break out of loop
                         found_contains_filter_text = True
                         break
                 if not found_contains_filter_text:
-                    logging.debug(f'Skipping event with title {event_title} because it does NOT contain '
+                    logging.debug(f'Skipping event with summary {event_summary} because it does NOT contain '
                                   f'the text in the given contains filter "{contains_filter}"')
                     result = True
-            # TODO: Filter by summary
-            # filter_by_summary = filters.get('summary', None)
     return result
 
 
@@ -652,6 +650,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
             if _should_be_excluded(from_event, exclusions, filters):
                 skipped_due_to_exclusion_match += 1
             else:
+                logging.info(f'Processing event: {from_event["summary"]}')
                 event_description = from_event.get('description', '')
                 from_event['description'] = get_updated_description(event_description, from_cal_name, date_time_now)
                 found = False

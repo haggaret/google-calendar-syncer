@@ -38,7 +38,7 @@ Resources:
       FunctionName: !Ref LambdaName
       CodeUri: src/
       Handler: google-calendar-syncer.lambda_handler
-      Runtime: python3.8
+      Runtime: python3.11
       Description: Lambda function to sync source google calendar(s) to destination calendar
       MemorySize: 128
       Timeout: 300
