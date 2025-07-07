@@ -36,28 +36,39 @@ Config file is a json document with the following info:
   "Destination Calendar 1" : {
     "destination_cal_id": "<destination_calendar_id>",
     "source_cals": {
-      "Source Calendar Name": "<source_calendar_id>"
-    },
-    "exclusions": {
-      "summary": [
-        "Summary Exclusion Text"
-      ]
-    },
-    "filters": {
-      "title": {
-        "contains": [
-          "filter contains text"
-        ]
+      "Source Calendar Name": {
+        "cal_id": "<source_calendar_id>",
+        "exclusions": {
+          "summary": [
+            "Summary Exclusion Text"
+          ]
+        },
+        "filters": {
+          "title": {
+            "contains": [
+              "filter contains text"
+            ]
+          }
+        }
       }
     }
   },
   "Destination Calendar 2" : {
     "destination_cal_id" : "<destination_calendar_id>",
-    "source_cals" :
-      {
-        "Source Calendar 1": "<source_calendar_id>",
-        "Source Calendar 2": "<source_calendar_id>"
+    "source_cals" : {
+      "Source Calendar 1": {
+        "cal_id": "<source_calendar_id>",
+        "adjustments": {
+          "duration": {
+            "before_event": "30",
+            "after_event": "30"
+          }
+        }
+      },
+      "Source Calendar 2": {
+        "cal_id": "<source_calendar_id>"
       }
+    }
   }
 }
 ```
