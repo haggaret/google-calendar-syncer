@@ -42,6 +42,13 @@ Config file is a json document with the following info:
       "summary": [
         "Summary Exclusion Text"
       ]
+    },
+    "filters": {
+      "title": {
+        "contains": [
+          "filter contains text"
+        ]
+      }
     }
   },
   "Destination Calendar 2" : {
@@ -107,8 +114,7 @@ confirm_changeset = false
 capabilities = "CAPABILITY_NAMED_IAM"
 parameter_overrides = [
   "Debug=false",
-  "UseS3=false",
-  "UseDynamoDB=true",
+  "TableName=TableName",
   "Schedule='rate(10 minutes)'"
 ]
 ```

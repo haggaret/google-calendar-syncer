@@ -2,3 +2,8 @@ google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 oauth2client
+bs4
+icalendar
+ics
+pytz
+requests
