@@ -530,7 +530,7 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
         after_adjust_seconds = duration_adjust_after * 60
         event_end = event_end + datetime.timedelta(seconds=after_adjust_seconds)
         logging.info(f'Adjusted end time by {duration_adjust_after} minutes to {event_end}')
-    updated_event_body = {'start': {'datetime': event_start.isoformat()}, 'end': {'datetime': event_end.isoformat()},
+    updated_event_body = {'start': {'dateTime': event_start.isoformat()}, 'end': {'dateTime': event_end.isoformat()},
                           'description': event['description']}
     if 'summary' in event:
         updated_event_body['summary'] = event['summary']
