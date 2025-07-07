@@ -428,24 +428,40 @@ def parse_ics(ical, starting_datetime=None):
     return events
 
 
-def insert_into_calendar(service_client, event, calendar, dryrun=False):
+def insert_into_calendar(service_client, event, calendar, adjustments=None, dryrun=False):
     result = True
     new_event_id = _get_gcal_event_id(event['id'])
     new_event = {'id': new_event_id, 'start': event['start'], 'end': event['end'], 'description': event['description']}
+    duration_adjust_before = None
+    duration_adjust_after = None
+    if adjustments:
+        duration_adjustment = adjustments.get('duration')
+        if duration_adjustment:
+            duration_adjust_before = int(duration_adjustment.get('before_event'))
+            duration_adjust_after = int(duration_adjustment.get('after_event'))
     duration_adjusted = False
     if 'dateTime' in event['start']:
         event_start = dateutil.parser.parse(event['start']['dateTime'])
+        if duration_adjust_before:
+            before_adjust_seconds = duration_adjust_before * 60
+            event_start = event_start - datetime.timedelta(seconds=before_adjust_seconds)
+            logging.info(f'Adjusted start time by {duration_adjust_before} minutes to {event_start}')
         event_end = dateutil.parser.parse(event['end']['dateTime'])
+        if duration_adjust_after:
+            after_adjust_seconds = duration_adjust_after * 60
+            event_end = event_end + datetime.timedelta(seconds=after_adjust_seconds)
+            logging.info(f'Adjusted end time by {duration_adjust_after} minutes to {event_end}')
         time_diff = event_end - event_start
         logging.debug(f'Event duration: {time_diff}')
-        if time_diff.days == 0 and time_diff.seconds < 61:
-            # Too short - set new event end time to start + 60 minutes
-            logging.warning(f'Event duration: {time_diff}')
-            logging.warning(f'Determined event duration to be too short - lengthening to 60 minutes')
-            new_event_end = event_start + datetime.timedelta(0, 3600)
-            end_datetime = new_event_end.isoformat()
-            new_event['end']['dateTime'] = end_datetime
-            duration_adjusted = True
+        if time_diff.days < 1:
+            if time_diff.seconds < 61:
+                # Too short - set new event end time to start + 60 minutes
+                logging.warning(f'Event duration: {time_diff}')
+                logging.warning(f'Determined event duration to be too short - lengthening to 60 minutes')
+                new_event_end = event_start + datetime.timedelta(seconds=3600)
+                end_datetime = new_event_end.isoformat()
+                new_event['end']['dateTime'] = end_datetime
+                duration_adjusted = True
     if 'summary' in event:
         new_event['summary'] = event['summary']
     if 'location' in event:
@@ -467,7 +483,7 @@ def insert_into_calendar(service_client, event, calendar, dryrun=False):
             result = False
             if 'The requested identifier already exists' in str(e):
                 logging.info('Requested ID already exists - will try updating instead...')
-                result = update_event_in_calendar(service_client, event, calendar, dryrun)
+                result = update_event_in_calendar(service_client, event, calendar, None, dryrun)
     else:
         logging.info(f"Dryrun insert event into calendar({calendar}): {new_event}")
     if duration_adjusted:
@@ -493,11 +509,29 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
     return result
 
 
-def update_event_in_calendar(service_client, event, calendar, dryrun=False):
+def update_event_in_calendar(service_client, event, calendar, adjustments=None, dryrun=False):
     result = True
     gcal_event_id = _get_gcal_event_id(event['id'])
     # event_id = event['id'].lstrip('_')
-    updated_event_body = {'start': event['start'], 'end': event['end'], 'description': event['description']}
+    duration_adjust_before = None
+    duration_adjust_after = None
+    if adjustments:
+        duration_adjustment = adjustments.get('duration')
+        if duration_adjustment:
+            duration_adjust_before = int(duration_adjustment.get('before_event'))
+            duration_adjust_after = int(duration_adjustment.get('after_event'))
+    event_start = dateutil.parser.parse(event['start']['dateTime'])
+    if duration_adjust_before:
+        before_adjust_seconds = duration_adjust_before * 60
+        event_start = event_start - datetime.timedelta(seconds=before_adjust_seconds)
+        logging.info(f'Adjusted start time by {duration_adjust_before} minutes to {event_start}')
+    event_end = dateutil.parser.parse(event['end']['dateTime'])
+    if duration_adjust_after:
+        after_adjust_seconds = duration_adjust_after * 60
+        event_end = event_end + datetime.timedelta(seconds=after_adjust_seconds)
+        logging.info(f'Adjusted end time by {duration_adjust_after} minutes to {event_end}')
+    updated_event_body = {'start': {'dateTime': event_start.isoformat()}, 'end': {'dateTime': event_end.isoformat()},
+                          'description': event['description']}
     if 'summary' in event:
         updated_event_body['summary'] = event['summary']
     if 'location' in event:
@@ -519,7 +553,7 @@ def update_event_in_calendar(service_client, event, calendar, dryrun=False):
             logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
             result = False
     else:
-        logging.info(f"Dryrun update event in calender({calendar}): {updated_event_body['summary']}")
+        logging.info(f"Dryrun update event in calendar({calendar}): {updated_event_body['summary']}")
     return result
 
 
@@ -566,11 +600,13 @@ def get_updated_description(event_description, from_cal_name, sync_time, cached_
 
 
 def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_cache, from_cal_events, to_cal,
-                            limit=0, exclusions=None, filters=None, dryrun=False):
+                            limit=0, exclusions=None, filters=None, adjustments=None, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
     skipped_due_to_exclusion_match = 0
+    if adjustments:
+        logging.info(f'Note: Found adjustments for given calendar: {adjustments} -  - all events will be adjusted accordingly')
     date_time_now = datetime.datetime.utcnow().isoformat() + 'Z'
     last_sync_time = dateutil.parser.parse(last_sync)
     if from_cal_cache:
@@ -714,7 +750,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
             failed_inserts = 0
             # Insert any new events
             for new_event in events_to_insert:
-                inserted = insert_into_calendar(service_client, new_event, to_cal, dryrun)
+                inserted = insert_into_calendar(service_client, new_event, to_cal, adjustments, dryrun)
                 if not inserted:
                     logging.error(f'Failed to insert the following event: {new_event}')
                     failed_inserts += 1
@@ -731,7 +767,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
             failed_updates = 0
             # Update events that need updating
             for update_event in events_to_update:
-                updated = update_event_in_calendar(service_client, update_event, to_cal, dryrun)
+                updated = update_event_in_calendar(service_client, update_event, to_cal, adjustments, dryrun)
                 if not updated:
                     logging.error(f'Failed to update the following event {update_event}')
                     failed_updates += 1
@@ -759,13 +795,16 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
         logging.info(f'Processing {item}')
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
-        exclusions = config[item].get('exclusions', None)
-        filters = config[item].get('filters', None)
+        # exclusions = config[item].get('exclusions', None)
+        # adjustments = config[item].get('adjustments', None)
+        # filters = config[item].get('filters', None)
         for src_cal_type in source_cals:
             for src_cal in source_cals[src_cal_type]:
                 if 'ics' in src_cal_type:
                     logging.info(f'Getting events from calendar {src_cal} (ICS)')
-                    src_cal_ics_url = source_cals[src_cal_type][src_cal]
+                    source_cal_info = source_cals[src_cal_type][src_cal]
+                    logging.info(f'Source cal info: {source_cal_info}')
+                    src_cal_ics_url = source_cal_info['ics_url']
                     ics_src_cal = get_ical_calendar(src_cal_ics_url)
                     # DEBUG
                     # input_ics_filepath = tempfile.mkdtemp() + 'latest.ics'
@@ -776,18 +815,23 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
                     src_cal_events = parse_ics(ics_src_cal, time)
                 elif 'google' in src_cal_type:
                     logging.info(f'Getting events from calendar {src_cal} (Google)')
-                    src_cal_id = source_cals[src_cal_type][src_cal]
+                    source_cal_info = source_cals[src_cal_type][src_cal]
+                    logging.info(f'Source cal info: {source_cal_info}')
+                    src_cal_id = source_cal_info['cal_id']
                     src_cal_events = get_events_for_calendar(time, service_client, src_cal_id, 0)
                 else:
                     # Unknown calendar type - exit
                     logging.error(f'Unknown source calendar type {src_cal_type} - unable to process')
                     return None, None
                 cal_name = src_cal
-                logging.debug(f'      Source Calendar ({cal_name}) events: {src_cal_events}')
+                logging.debug(f'Source Calendar ({cal_name}) events: {src_cal_events}')
                 if refresh_cache:
                     src_cal_cache = None
                 else:
                     src_cal_cache = (cache[cal_name] if cache and cal_name in cache else None)
+                exclusions = source_cal_info.get('exclusions', None)
+                adjustments = source_cal_info.get('adjustments', None)
+                filters = source_cal_info.get('filters', None)
                 updated_cache_events = sync_events_to_calendar(service_client,
                                                                time,
                                                                src_cal,
@@ -797,6 +841,7 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
                                                                0,
                                                                exclusions,
                                                                filters,
+                                                               adjustments,
                                                                dryrun)
                 old_cache[cal_name] = (cache[cal_name] if cache and cal_name in cache else None)
                 # Remove any canceled events from src_cal_event before writing to cache
