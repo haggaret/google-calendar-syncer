@@ -434,11 +434,15 @@ def insert_into_calendar(service_client, event, calendar, adjustments=None, dryr
     new_event = {'id': new_event_id, 'start': event['start'], 'end': event['end'], 'description': event['description']}
     duration_adjust_before = None
     duration_adjust_after = None
+    summary_prefix = None
     if adjustments:
         duration_adjustment = adjustments.get('duration')
         if duration_adjustment:
             duration_adjust_before = int(duration_adjustment.get('before_event'))
             duration_adjust_after = int(duration_adjustment.get('after_event'))
+        summary_adjustment = adjustments.get('summary')
+        if summary_adjustment:
+            summary_prefix = summary_adjustment.get('prefix')
     duration_adjusted = False
     if 'dateTime' in event['start']:
         event_start = dateutil.parser.parse(event['start']['dateTime'])
@@ -446,11 +450,13 @@ def insert_into_calendar(service_client, event, calendar, adjustments=None, dryr
             before_adjust_seconds = duration_adjust_before * 60
             event_start = event_start - datetime.timedelta(seconds=before_adjust_seconds)
             logging.info(f'Adjusted start time by {duration_adjust_before} minutes to {event_start}')
+            new_event['start']['dateTime'] = event_start.isoformat()
         event_end = dateutil.parser.parse(event['end']['dateTime'])
         if duration_adjust_after:
             after_adjust_seconds = duration_adjust_after * 60
             event_end = event_end + datetime.timedelta(seconds=after_adjust_seconds)
             logging.info(f'Adjusted end time by {duration_adjust_after} minutes to {event_end}')
+            new_event['end']['dateTime'] = event_end.isoformat()
         time_diff = event_end - event_start
         logging.debug(f'Event duration: {time_diff}')
         if time_diff.days < 1:
@@ -463,7 +469,10 @@ def insert_into_calendar(service_client, event, calendar, adjustments=None, dryr
                 new_event['end']['dateTime'] = end_datetime
                 duration_adjusted = True
     if 'summary' in event:
-        new_event['summary'] = event['summary']
+        event_summary = event['summary']
+        if summary_prefix:
+            event_summary = f"{summary_prefix}{event_summary}"
+        new_event['summary'] = event_summary
     if 'location' in event:
         new_event['location'] = event['location']
     if 'recurrence' in event:
@@ -515,11 +524,15 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
     # event_id = event['id'].lstrip('_')
     duration_adjust_before = None
     duration_adjust_after = None
+    summary_prefix = None
     if adjustments:
         duration_adjustment = adjustments.get('duration')
         if duration_adjustment:
             duration_adjust_before = int(duration_adjustment.get('before_event'))
             duration_adjust_after = int(duration_adjustment.get('after_event'))
+        summary_adjustment = adjustments.get('summary')
+        if summary_adjustment:
+            summary_prefix = summary_adjustment.get('prefix')
     event_start = dateutil.parser.parse(event['start']['dateTime'])
     if duration_adjust_before:
         before_adjust_seconds = duration_adjust_before * 60
@@ -533,7 +546,10 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
     updated_event_body = {'start': {'dateTime': event_start.isoformat()}, 'end': {'dateTime': event_end.isoformat()},
                           'description': event['description']}
     if 'summary' in event:
-        updated_event_body['summary'] = event['summary']
+        event_summary = event['summary']
+        if summary_prefix:
+            event_summary = f"{summary_prefix}{event_summary}"
+        updated_event_body['summary'] = event_summary
     if 'location' in event:
         updated_event_body['location'] = event['location']
     if 'recurrence' in event:
@@ -551,7 +567,13 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
                 f"Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
         except Exception as e:
             logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
-            result = False
+            # result = False
+            # <HttpError 404 when requesting https://www.googleapis.com/calendar/v3/calendars/cate%40haggerty.ca/events/696c39767035363538346e7333683461646a3638733669366a385f3230323530383230543231333030305a?sendUpdates=all&alt=json returned "Not Found".
+            # Details: "[{'domain': 'global', 'reason': 'notFound', 'message': 'Not Found'}]">
+            # TODO: Check failure reason - if not found, then just create the event?
+            # Try an insert...
+            logging.error(f'Event not found? Will attempt in insert instead...')
+            result = insert_into_calendar(service_client, event, calendar, adjustments, dryrun)
     else:
         logging.info(f"Dryrun update event in calendar({calendar}): {updated_event_body['summary']}")
     return result
