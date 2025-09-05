@@ -26,7 +26,8 @@ optional arguments:
   --region REGION       AWS region S3 bucket is in
   --cleanup             Clean up temp folder after exection
   --verbose             Turn on DEBUG logging
-  --dryrun              Do a dryrun - no changes will be performed```
+  --dryrun              Do a dryrun - no changes will be performed
+  --cache-refresh       Refresh cache - ignore existing cache
 ```
 
 Config file is a json document with the following info:
@@ -118,13 +119,13 @@ version = 0.1
 [default.deploy]
 [default.deploy.parameters]
 stack_name = "google-calendar-syncer"
-s3_bucket = "<lambda-deploy-bucket>"
-s3_prefix = "google-calendar-syncer"
+resolve_s3 = true
 region = "<aws-region>"
 confirm_changeset = false
 capabilities = "CAPABILITY_NAMED_IAM"
 parameter_overrides = [
   "Debug=false",
+  "BucketName=bucketname",
   "TableName=TableName",
   "Schedule='rate(10 minutes)'"
 ]
@@ -133,9 +134,11 @@ parameter_overrides = [
 Running the deploy will create or update a cloudformation stack.
 
 ####Note:
-- the bucket_name referenced above will likely be a *different* bucket than was used during the package step above
+- BucketName should conform to S3 bucket naming restrictions - if not provided, `googlecalendarsyncer` will be used
+- TableName shoudl conform to DynamoDB naming restrictions - if not provided, `GoogleCalendarSyncer` will be used
 - see [here](https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html) for schedule_expression values
 
+The DynamoDB table is used for storing config and credentials, and the S3 bucket is used for storing calendar caches.
 
 ## Running using Docker (under development)
 

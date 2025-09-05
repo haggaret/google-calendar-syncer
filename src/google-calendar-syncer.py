@@ -1065,6 +1065,8 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", help="Turn on DEBUG logging", action='store_true')
     parser.add_argument("--dryrun", help="Do a dryrun - no changes will be performed", dest='dryrun',
                         action='store_true', default=False)
+    parser.add_argument("--cache-refresh", help="Refresh cache - ignore existing cache", dest='cache_refresh',
+                        action='store_true', default=False)
     args = parser.parse_args()
 
     main_log_level = logging.INFO
@@ -1193,18 +1195,19 @@ if __name__ == "__main__":
         # no last sync time can be found - use the time NOW - only look at event from this point forward
         main_last_sync_time = now
 
-    old_cache, new_cache = sync_events(service, main_last_sync_time, main_config, cache, dryrun=args.dryrun)
+    old_cache, new_cache = sync_events(service, main_last_sync_time, main_config, cache, refresh_cache=args.cache_refresh, dryrun=args.dryrun)
 
     if not args.dryrun:
         # Update the cache
-        if args.config.startswith('s3://'):
+        if args.config and args.config.startswith('s3://'):
             _update_s3_calendar_cache(main_s3_client, main_s3_bucket, new_cache, old_cache)
             _update_last_sync_time_in_s3(main_s3_client, main_s3_bucket, now)
-        if args.config.startswith('dynamodb:'):
+        elif args.config and args.config.startswith('dynamodb:'):
             _update_dynamodb_calendar_cache(main_table_client, new_cache, old_cache)
             _update_last_sync_time_in_dynamodb(main_table_client, now)
         else:
             _update_local_calendar_cache(main_storage_path, new_cache, old_cache)
+
     else:
         logging.info('DRYRUN - cache contents: {}'.format(json.dumps(new_cache)))
 
