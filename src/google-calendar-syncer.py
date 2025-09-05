@@ -12,8 +12,10 @@ import binascii
 import requests
 import re
 import pytz
+import time
 from icalendar import Calendar, vText
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from httplib2 import Http
 from oauth2client import file, client, tools
 from bs4 import BeautifulSoup
@@ -73,7 +75,7 @@ def _put_obj_to_s3(s3_client, bucket, key, obj):
 
 
 def _put_to_dynamodb(table_client, key, value):
-    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
+    now = datetime.datetime.now(datetime.UTC).isoformat()
     table_client.put_item(Item={'key': key, 'jsonData': value, 'lastModified': now})
 
 
@@ -150,10 +152,15 @@ def _get_config_from_s3(s3_client, bucket):
 
 
 def _get_config_from_dynamodb(table_client):
-    config = None
-    dynamodb_content = _get_from_dynamodb(table_client, 'config', 'jsonData')
-    if dynamodb_content:
-        config = dynamodb_content
+    # First read the config row from the table - this will contain a list of sub-configs to read
+    config = {}
+    sub_config_list = _get_from_dynamodb(table_client, 'calendars', 'destinations')
+    if sub_config_list:
+        # For each item in teh sub_config_list, grab its config
+        for sub_config in sub_config_list:
+            config_content = _get_from_dynamodb(table_client, sub_config, 'config')
+            if config_content:
+                config[sub_config] = config_content
     return config
 
 
@@ -184,21 +191,34 @@ def _load_dynamodb_calendar_cache(table_client):
 def _load_s3_calendar_cache(s3_client, s3_bucket):
     logging.info('Checking for cache files...')
     cache_dict = {}
-    response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
-    if len(response['Contents']) > 0:
-        logging.info('Getting cache files...')
-    for obj in response['Contents']:
-        s3_path = obj['Key']
-        if s3_path == 'cache/':
-            continue
-        else:
-            # This a cache file
-            if s3_path.endswith('.old'):
+    try:
+        response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
+        if 'Contents' not in response:
+            logging.info('No cache files found')
+            return cache_dict
+
+        if len(response['Contents']) > 0:
+            logging.info('Getting cache files...')
+
+        for obj in response['Contents']:
+            s3_path = obj['Key']
+            if s3_path == 'cache/' or s3_path.endswith('.old'):
                 continue
-            cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path).decode('utf-8')
-            # Get the cal_id from the s3_path
-            cal_id = s3_path.lstrip('cache/')
-            cache_dict[cal_id] = json.loads(cache_obj_contents)
+
+            try:
+                cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path)
+                if cache_obj_contents:
+                    cal_id = s3_path.lstrip('cache/')
+                    cache_dict[cal_id] = json.loads(cache_obj_contents.decode('utf-8'))
+                else:
+                    logging.warning(f'Empty cache file found: {s3_path}')
+            except Exception as e:
+                logging.error(f'Error loading cache file {s3_path}: {e}')
+                continue
+
+    except Exception as e:
+        logging.error(f'Error listing S3 objects: {e}')
+
     return cache_dict
 
 
@@ -219,11 +239,14 @@ def _update_local_calendar_cache(storage_path, new_cache, old_cache):
 
 
 def _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache):
+    logging.info(f'Saving Calendar cache to S3 bucket: {bucket}')
     for cal in new_cache:
         cache_key = 'cache/' + cal + '.cache'
+        logging.info(f'Writing object {cache_key}')
         _put_obj_to_s3(s3_client, bucket, cache_key, new_cache[cal])
     for cal in old_cache:
         old_cache_key = 'cache/' + cal + '.cache.old'
+        logging.info(f'Writing object {old_cache_key}')
         _put_obj_to_s3(s3_client, bucket, old_cache_key, old_cache[cal])
 
 
@@ -254,10 +277,12 @@ def _get_last_sync_time_from_s3(s3_client, bucket):
 
 
 def _update_last_sync_time_in_dynamodb(table_client, sync_time):
+    logging.info(f'Updating last sync time to: {sync_time}')
     table_client.put_item(Item={'key': 'last_sync', 'lastModified': sync_time})
 
 
 def _update_last_sync_time_in_s3(s3_client, bucket, sync_time):
+    logging.info(f'Updating last sync time to: {sync_time}')
     _put_obj_to_s3(s3_client, bucket, 'last_sync', sync_time)
 
 
@@ -481,18 +506,41 @@ def insert_into_calendar(service_client, event, calendar, adjustments=None, dryr
         new_event['reminders'] = event['reminders']
     # TODO: Figure out how to make the creator be "Google Calendar Syncer"
     if not dryrun:
-        try:
-            logging.info(f'Attempting to insert the following event: {new_event}')
-            response = service_client.events().insert(calendarId=calendar, body=new_event).execute()
-            logging.info(f"Event created: {response['summary']}")
-            logging.info("Date/Time: %s - %s" % (
-                parse_to_string(response['start']), parse_to_string(response['end'])))
-        except Exception as e:
-            logging.warning(f'Exception inserting into calendar: {e}')
-            result = False
-            if 'The requested identifier already exists' in str(e):
-                logging.info('Requested ID already exists - will try updating instead...')
-                result = update_event_in_calendar(service_client, event, calendar, None, dryrun)
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                logging.info(f'Attempting to insert the following event: {new_event}')
+                response = service_client.events().insert(calendarId=calendar, body=new_event).execute()
+                logging.info(f"Event created: {response['summary']}")
+                logging.info("Date/Time: %s - %s" % (
+                    parse_to_string(response['start']), parse_to_string(response['end'])))
+                break
+            except HttpError as e:
+                if e.resp.status == 403 and 'rateLimitExceeded' in str(e):
+                    if attempt < max_retries - 1:
+                        wait_time = (2 ** attempt) + 1
+                        logging.warning(f'Rate limit exceeded, retrying in {wait_time} seconds (attempt {attempt + 1}/{max_retries})')
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logging.error(f'Rate limit exceeded after {max_retries} attempts')
+                        result = False
+                        break
+                elif e.resp.status == 409 or 'The requested identifier already exists' in str(e):
+                    logging.info('Event ID already exists - will try updating instead...')
+                    result = update_event_in_calendar(service_client, event, calendar, adjustments, dryrun)
+                    break
+                else:
+                    logging.warning(f'Exception inserting into calendar: {e}')
+                    result = False
+                    break
+            except Exception as e:
+                logging.warning(f'Exception inserting into calendar: {e}')
+                result = False
+                if 'The requested identifier already exists' in str(e):
+                    logging.info('Requested ID already exists - will try updating instead...')
+                    result = update_event_in_calendar(service_client, event, calendar, None, dryrun)
+                break
     else:
         logging.info(f"Dryrun insert event into calendar({calendar}): {new_event}")
     if duration_adjusted:
@@ -504,15 +552,33 @@ def delete_from_calendar(service_client, event, calendar, dryrun=False):
     result = True
     gcal_event_id = _get_gcal_event_id(event['id'])
     if not dryrun:
-        try:
-            response = service_client.events().delete(calendarId=calendar, eventId=gcal_event_id,
-                                                      sendUpdates='all').execute()
-            logging.debug(f'Response: {response}')
-            logging.info(f'Event deleted: {str(event)}')
-        except Exception as e:
-            logging.error(f'Exception deleting event ({str(event)}) from calendar: {str(e)}')
-            result = False
-
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = service_client.events().delete(calendarId=calendar, eventId=gcal_event_id,
+                                                          sendUpdates='all').execute()
+                logging.debug(f'Response: {response}')
+                logging.info(f'Event deleted: {str(event)}')
+                break
+            except HttpError as e:
+                if e.resp.status == 403 and 'rateLimitExceeded' in str(e):
+                    if attempt < max_retries - 1:
+                        wait_time = (2 ** attempt) + 1
+                        logging.warning(f'Rate limit exceeded, retrying in {wait_time} seconds (attempt {attempt + 1}/{max_retries})')
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logging.error(f'Rate limit exceeded after {max_retries} attempts')
+                        result = False
+                        break
+                else:
+                    logging.error(f'Exception deleting event ({str(event)}) from calendar: {str(e)}')
+                    result = False
+                    break
+            except Exception as e:
+                logging.error(f'Exception deleting event ({str(event)}) from calendar: {str(e)}')
+                result = False
+                break
     else:
         logging.info(f"Dryrun delete event from calendar({calendar}): {event['summary']}")
     return result
@@ -559,21 +625,38 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
     # TODO: Figure out how to make the creator be "Google Calendar Syncer"
 
     if not dryrun:
-        try:
-            response = service_client.events().update(calendarId=calendar, eventId=gcal_event_id,
-                                                      body=updated_event_body, sendUpdates='all').execute()
-            logging.info(f"Event updated: {response['summary']}")
-            logging.info(
-                f"Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
-        except Exception as e:
-            logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
-            # result = False
-            # <HttpError 404 when requesting https://www.googleapis.com/calendar/v3/calendars/cate%40haggerty.ca/events/696c39767035363538346e7333683461646a3638733669366a385f3230323530383230543231333030305a?sendUpdates=all&alt=json returned "Not Found".
-            # Details: "[{'domain': 'global', 'reason': 'notFound', 'message': 'Not Found'}]">
-            # TODO: Check failure reason - if not found, then just create the event?
-            # Try an insert...
-            logging.error(f'Event not found? Will attempt in insert instead...')
-            result = insert_into_calendar(service_client, event, calendar, adjustments, dryrun)
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = service_client.events().update(calendarId=calendar, eventId=gcal_event_id,
+                                                          body=updated_event_body, sendUpdates='all').execute()
+                logging.info(f"Event updated: {response['summary']}")
+                logging.info(
+                    f"Date(s): %s - %s" % (parse_to_string(response['start']), parse_to_string(response['end'])))
+                break
+            except HttpError as e:
+                if e.resp.status == 403 and 'rateLimitExceeded' in str(e):
+                    if attempt < max_retries - 1:
+                        wait_time = (2 ** attempt) + 1
+                        logging.warning(f'Rate limit exceeded, retrying in {wait_time} seconds (attempt {attempt + 1}/{max_retries})')
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logging.error(f'Rate limit exceeded after {max_retries} attempts')
+                        result = False
+                        break
+                elif e.resp.status == 404:
+                    logging.error(f'Event not found? Will attempt insert instead...')
+                    result = insert_into_calendar(service_client, event, calendar, adjustments, dryrun)
+                    break
+                else:
+                    logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
+                    result = False
+                    break
+            except Exception as e:
+                logging.error(f'Exception updating event ({str(updated_event_body)}) in calendar: {str(e)}')
+                result = False
+                break
     else:
         logging.info(f"Dryrun update event in calendar({calendar}): {updated_event_body['summary']}")
     return result
@@ -629,7 +712,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
     skipped_due_to_exclusion_match = 0
     if adjustments:
         logging.info(f'Note: Found adjustments for given calendar: {adjustments} -  - all events will be adjusted accordingly')
-    date_time_now = datetime.datetime.utcnow().isoformat() + 'Z'
+    date_time_now = datetime.datetime.now(datetime.UTC).isoformat()
     last_sync_time = dateutil.parser.parse(last_sync)
     if from_cal_cache:
         logging.info(f'Found a cache for the source calendar with name: {from_cal_name}')
@@ -669,23 +752,28 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             logging.info('Canceled event - remove from destination calendar')
                             events_to_delete.append(cache_event)
                             break
-                        # TODO: Uncomment the code below if we want to be more selective about only updating events that have changed
-                        # # now check the updated time
-                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
-                        # cache_event_updated_time = dateutil.parser.parse(cache_event['last-modified']['dateTime'])
-                        # time_diff = cache_event_updated_time - from_event_updated_time
-                        # # if the from_event has a later updated time, we need to update the event
-                        # if time_diff.days < 0:
-                        #     # Add this to the events_to_update list
-                        #     logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
-                        #     events_to_update.append(from_event)
-                        logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
-                        event_description = from_event.get('description', '')
-                        cached_event_description = cache_event.get('description', '')
-                        from_event['description'] = get_updated_description(event_description, from_cal_name,
-                                                                            date_time_now, cached_event_description)
-                        events_to_update.append(from_event)
-                        break
+                        # now check the updated time
+                        from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
+                        cache_event_updated_time = dateutil.parser.parse(cache_event['last-modified']['dateTime'])
+                        time_diff = cache_event_updated_time - from_event_updated_time
+                        # if the from_event has a later updated time, we need to update the event
+                        if time_diff.days < 0:
+                            # Add this to the events_to_update list
+                            logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
+                            event_description = from_event.get('description', '')
+                            cached_event_description = cache_event.get('description', '')
+                            from_event['description'] = get_updated_description(event_description, from_cal_name,
+                                                                                date_time_now, cached_event_description)
+                            events_to_update.append(from_event)
+                            break
+                        # TODO: Remove the code below if the above is working
+                        # logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
+                        # event_description = from_event.get('description', '')
+                        # cached_event_description = cache_event.get('description', '')
+                        # from_event['description'] = get_updated_description(event_description, from_cal_name,
+                        #                                                     date_time_now, cached_event_description)
+                        # events_to_update.append(from_event)
+                        # break
                 if not found_in_cache:
                     # Didn't find the event ID in the cached events - it must be new
                     # check to see if it's a canceled event
@@ -722,20 +810,20 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             logging.info('Canceled event - remove from destination calendar')
                             events_to_delete.append(from_event)
                             break
-                        # TODO: Uncomment the code below if we want to be more selective about only updating events that have changed
                         # now check the updated time
-                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
-                        # to_event_updated_time = dateutil.parser.parse(to_event['last-modified']['dateTime'])
-                        # time_diff = to_event_updated_time - from_event_updated_time
-                        # # if the from_event has a later updated time, we need to update the event
-                        # if time_diff.days < 0:
-                        #     logging.info('Found an event that needs to be updated (based on later updated time)')
-                        #     # Need to update this event
-                        #     events_to_update.append(from_event)
-                        #     break
-                        logging.info(f"Event with ID: {from_event['id']} should be updated")
-                        events_to_update.append(from_event)
-                        break
+                        from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
+                        to_event_updated_time = dateutil.parser.parse(to_event['last-modified']['dateTime'])
+                        time_diff = to_event_updated_time - from_event_updated_time
+                        # if the from_event has a later updated time, we need to update the event
+                        if time_diff.days < 0:
+                            logging.info('Found an event that needs to be updated (based on later updated time)')
+                            # Need to update this event
+                            events_to_update.append(from_event)
+                            break
+                        # TODO: Remove the code below if the above is working
+                        # logging.info(f"Event with ID: {from_event['id']} should be updated")
+                        # events_to_update.append(from_event)
+                        # break
                 if not found:
                     # check to see if it's a canceled event
                     if is_canceled_event(from_event):
@@ -885,50 +973,44 @@ def lambda_handler(event, context):
 
     logging.debug("Received event: {}".format(json.dumps(event)))
 
-    s3_client = None
-    table_client = None
+    # s3_client = None
+    # table_client = None
+    # config = None
+    storage_path = tempfile.mkdtemp()
 
-    if 'DYNAMODB_TABLE' in os.environ:
-        # Prefer DynamoDB over S3
-        table = os.environ.get('DYNAMODB_TABLE')
-        dynamodb_client = boto3.resource('dynamodb')
-        table_client = dynamodb_client.Table(table)
-    elif 'S3_BUCKET' in os.environ:
-        bucket = os.environ.get('S3_BUCKET')
-        s3_client = boto3.client('s3')
-    else:
+    # TODO: Add a switch for ALL DynamoDB or ALL S3
+    if 'DYNAMODB_TABLE' not in os.environ and 'S3_BUCKET' not in os.environ:
         logging.critical('Missing required env var (DYNAMODB_TABLE/S3_BUCKET) - cannot continue')
+        exit(1)
+
+    # Prefer DynamoDB over S3
+    table = os.environ.get('DYNAMODB_TABLE')
+    dynamodb_client = boto3.resource('dynamodb')
+    table_client = dynamodb_client.Table(table)
+    config = _get_config_from_dynamodb(table_client)
+    # Get the OAUTH credentials
+    _load_creds_from_dynamodb(table_client, storage_path)
+    # cache = _load_dynamodb_calendar_cache(table_client)
+    last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
+
+    bucket = os.environ.get('S3_BUCKET')
+    s3_client = boto3.client('s3')
+    # config = _get_config_from_s3(s3_client, bucket)
+    # Get the OAUTH credentials
+    # _load_creds_from_s3(s3_client, bucket, storage_path)
+    cache = _load_s3_calendar_cache(s3_client, bucket)
+    # last_sync_time = _get_last_sync_time_from_s3(s3_client, bucket)
+
+    if config is None or len(config) == 0:
+        logging.critical('Missing config - cannot continue')
         exit(1)
 
     dryrun = event.get('dryrun', False)
     if 'DRYRUN' in os.environ:
         dryrun = True
-
-    if dryrun:
         logging.info('Dry run specified - no changes will be made')
 
-    config = None
-    if table_client:
-        config = _get_config_from_dynamodb(table_client)
-    elif s3_client:
-        config = _get_config_from_s3(s3_client, bucket)
-
-    if not config:
-        logging.critical('Missing config - cannot continue')
-        exit(1)
-
-    storage_path = tempfile.mkdtemp()
-    # Get the OAUTH credentials
-    if table_client:
-        _load_creds_from_dynamodb(table_client, storage_path)
-        cache = _load_dynamodb_calendar_cache(table_client)
-        last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
-    else:
-        _load_creds_from_s3(s3_client, bucket, storage_path)
-        cache = _load_s3_calendar_cache(s3_client, bucket)
-        last_sync_time = _get_last_sync_time_from_s3(s3_client, bucket)
-
-    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
+    now = datetime.datetime.now(datetime.UTC).isoformat()
 
     if not last_sync_time:
         # no last sync time can be found - use the time NOW - only look at event from this point forward
@@ -943,21 +1025,24 @@ def lambda_handler(event, context):
 
     if not dryrun:
         # Update the cache
-        if table_client:
-            _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
-            _update_last_sync_time_in_dynamodb(table_client, now)
-        else:
-            _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache)
-            _update_last_sync_time_in_s3(s3_client, bucket, now)
+        _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache)
+        _update_last_sync_time_in_dynamodb(table_client, now)
+        # if table_client:
+        #     _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
+        #     _update_last_sync_time_in_dynamodb(table_client, now)
+        # else:
+        #     _update_s3_calendar_cache(s3_client, bucket, new_cache, old_cache)
+        #     _update_last_sync_time_in_s3(s3_client, bucket, now)
 
     # Update the token file
     token_key = 'token.json'
     token_path = storage_path + os.sep + token_key
-    if table_client:
-        token_json = _get_file_contents_as_json(token_path)
-        _put_to_dynamodb(table_client, 'token', json.dumps(token_json))
-    else:
-        _put_file_to_s3(s3_client, bucket, token_key, token_path)
+    logging.info('Updating google token value')
+    # if table_client:
+    token_json = _get_file_contents_as_json(token_path)
+    _put_to_dynamodb(table_client, 'token', json.dumps(token_json))
+    # else:
+    #     _put_file_to_s3(s3_client, bucket, token_key, token_path)
 
     logging.info('Cleaning up...')
     shutil.rmtree(storage_path)
@@ -982,11 +1067,11 @@ if __name__ == "__main__":
                         action='store_true', default=False)
     args = parser.parse_args()
 
-    log_level = logging.INFO
+    main_log_level = logging.INFO
 
     if args.verbose:
         print("Verbose logging selected")
-        log_level = logging.DEBUG
+        main_log_level = logging.DEBUG
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -996,9 +1081,9 @@ if __name__ == "__main__":
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)8s: %(message)s')
     fh.setFormatter(file_formatter)
     logger.addHandler(fh)
-    # create console handler using level set in log_level
+    # create console handler using level set in main_log_level
     ch = logging.StreamHandler()
-    ch.setLevel(log_level)
+    ch.setLevel(main_log_level)
     console_formatter = logging.Formatter('%(levelname)8s: %(message)s')
     ch.setFormatter(console_formatter)
     logger.addHandler(ch)
@@ -1019,69 +1104,70 @@ if __name__ == "__main__":
             logging.critical('Must provide either (--src-cal AND --dst-cal) OR --config')
             exit(1)
 
-    config = None
-    s3_client = None
-    s3_bucket = None
-    table_client = None
-    dynamodb_client = None
+    main_config = None
+    main_s3_client = None
+    main_s3_bucket = None
+    main_dynamodb_client = None
+    main_table_client = None
 
     # Used for token.json, credentials.json and cache folder and files
-    storage_path = '.'
+    main_storage_path = '.'
     cache = None
-    last_sync_time = None
+    main_last_sync_time = None
 
+    # TODO: Fix this to work with BOTH DynamoDB and S3
     if args.config:
         if args.config.startswith('s3://'):
             # S3 config
             logging.info('S3 config specified')
             if args.profile or args.region:
                 session = boto3.session.Session(profile_name=args.profile, region_name=args.region)
-                s3_client = session.client('s3')
+                main_s3_client = session.client('s3')
             else:
-                s3_client = boto3.client('s3')
+                main_s3_client = boto3.client('s3')
             s3_path = args.config.split('s3://')[1]
-            s3_bucket = s3_path.split('/')[0]
-            config = _get_config_from_s3(s3_client, s3_bucket)
-            storage_path = tempfile.mkdtemp()
+            main_s3_bucket = s3_path.split('/')[0]
+            main_config = _get_config_from_s3(main_s3_client, main_s3_bucket)
+            main_storage_path = tempfile.mkdtemp()
             # Get the credentials
-            _load_creds_from_s3(s3_client, s3_bucket, storage_path)
+            _load_creds_from_s3(main_s3_client, main_s3_bucket, main_storage_path)
             # Get the cache
-            cache = _load_s3_calendar_cache(s3_client, s3_bucket)
-            last_sync_time = _get_last_sync_time_from_s3(s3_client, s3_bucket)
+            cache = _load_s3_calendar_cache(main_s3_client, main_s3_bucket)
+            main_last_sync_time = _get_last_sync_time_from_s3(main_s3_client, main_s3_bucket)
         elif args.config.startswith('dynamodb:'):
             # DynamoDB config
             logging.info('DynamoDB config specified')
             table_name = args.config.split('dynamodb:')[1]
             if args.profile or args.region:
                 boto3.setup_default_session(profile_name=args.profile)
-                dynamodb_client = boto3.resource('dynamodb', region_name=args.region)
+                main_dynamodb_client = boto3.resource('dynamodb', region_name=args.region)
             else:
-                dynamodb_client = boto3.client('dynamodb')
-            table_client = dynamodb_client.Table(table_name)
-            config = _get_config_from_dynamodb(table_client)
-            storage_path = tempfile.mkdtemp()
+                main_dynamodb_client = boto3.client('dynamodb')
+            main_table_client = main_dynamodb_client.Table(table_name)
+            main_config = _get_config_from_dynamodb(main_table_client)
+            main_storage_path = tempfile.mkdtemp()
             # Get the credentials
-            _load_creds_from_dynamodb(table_client, storage_path)
+            _load_creds_from_dynamodb(main_table_client, main_storage_path)
             # Get the cache
-            cache = _load_dynamodb_calendar_cache(table_client)
+            cache = _load_dynamodb_calendar_cache(main_table_client)
             logging.debug('Cache: {}'.format(json.dumps(cache)))
-            last_sync_time = _get_last_sync_time_from_dynamodb(table_client)
+            main_last_sync_time = _get_last_sync_time_from_dynamodb(main_table_client)
         else:
             # Local config file
             logging.info('Local config specified')
             if os.path.exists(args.config):
                 with open(args.config, 'r') as f:
-                    config = json.loads(f.read())
+                    main_config = json.loads(f.read())
             else:
                 logging.error(f"Config file doesn't exist at given path: {args.config}")
                 exit(1)
-            cache_path = os.path.join(storage_path, 'cache')
+            cache_path = os.path.join(main_storage_path, 'cache')
             if os.path.exists(cache_path):
                 cache = _load_local_calendar_cache(cache_path)
 
     else:
         # Single source and destination calendar provided
-        config = {
+        main_config = {
             "Destination Calendar": {
                 "destination_cal_id": args.dst_cal_id,
                 "source_cals": [
@@ -1093,37 +1179,37 @@ if __name__ == "__main__":
             }
         }
 
-    if not config:
+    if not main_config:
         logging.critical('Config is empty - cannot continue')
         exit(1)
 
     logging.debug("STARTING RUN")
 
-    service = authorize(storage_path)
+    service = authorize(main_storage_path)
 
-    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
+    now = datetime.datetime.now(datetime.UTC).isoformat()
 
-    if not last_sync_time:
+    if not main_last_sync_time:
         # no last sync time can be found - use the time NOW - only look at event from this point forward
-        last_sync_time = now
+        main_last_sync_time = now
 
-    old_cache, new_cache = sync_events(service, last_sync_time, config, cache, dryrun=args.dryrun)
+    old_cache, new_cache = sync_events(service, main_last_sync_time, main_config, cache, dryrun=args.dryrun)
 
     if not args.dryrun:
         # Update the cache
         if args.config.startswith('s3://'):
-            _update_s3_calendar_cache(s3_client, s3_bucket, new_cache, old_cache)
-            _update_last_sync_time_in_s3(s3_client, s3_bucket, now)
+            _update_s3_calendar_cache(main_s3_client, main_s3_bucket, new_cache, old_cache)
+            _update_last_sync_time_in_s3(main_s3_client, main_s3_bucket, now)
         if args.config.startswith('dynamodb:'):
-            _update_dynamodb_calendar_cache(table_client, new_cache, old_cache)
-            _update_last_sync_time_in_dynamodb(table_client, now)
+            _update_dynamodb_calendar_cache(main_table_client, new_cache, old_cache)
+            _update_last_sync_time_in_dynamodb(main_table_client, now)
         else:
-            _update_local_calendar_cache(storage_path, new_cache, old_cache)
+            _update_local_calendar_cache(main_storage_path, new_cache, old_cache)
     else:
         logging.info('DRYRUN - cache contents: {}'.format(json.dumps(new_cache)))
 
     if args.cleanup:
         logging.info('Cleaning up...')
-        shutil.rmtree(storage_path)
+        shutil.rmtree(main_storage_path)
 
     logging.info("DONE")
