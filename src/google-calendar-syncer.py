@@ -188,38 +188,54 @@ def _load_dynamodb_calendar_cache(table_client):
     return cache_dict
 
 
-def _load_s3_calendar_cache(s3_client, s3_bucket):
+def _load_s3_calendar_cache(s3_client, s3_bucket, cal_name=None):
     logging.info('Checking for cache files...')
-    cache_dict = {}
-    try:
-        response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
-        if 'Contents' not in response:
-            logging.info('No cache files found')
-            return cache_dict
+    if cal_name:
+        # Looking for a specific calendar cache
+        cal_cache = None
+        s3_path = f'cache/{cal_name}.cache'
+        try:
+            cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path)
+            if cache_obj_contents:
+                cal_cache = json.loads(cache_obj_contents.decode('utf-8'))
+            else:
+                logging.warning(f'Empty cache file found: {s3_path}')
+        except Exception as e:
+            logging.error(f'Error loading cache file {s3_path}: {e}')
+        return cal_cache
+    else:
+        cache_dict = {}
+        # Get ALL calendar caches
+        try:
+            response = s3_client.list_objects(Bucket=s3_bucket, Prefix='cache/')
+            if 'Contents' not in response:
+                logging.info('No cache files found')
+                return cache_dict
 
-        if len(response['Contents']) > 0:
-            logging.info('Getting cache files...')
+            if len(response['Contents']) > 0:
+                logging.info('Getting cache files...')
 
-        for obj in response['Contents']:
-            s3_path = obj['Key']
-            if s3_path == 'cache/' or s3_path.endswith('.old'):
-                continue
+            for obj in response['Contents']:
+                s3_path = obj['Key']
+                if s3_path == 'cache/' or s3_path.endswith('.old'):
+                    continue
 
-            try:
-                cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path)
-                if cache_obj_contents:
-                    cal_id = s3_path.lstrip('cache/')
-                    cache_dict[cal_id] = json.loads(cache_obj_contents.decode('utf-8'))
-                else:
-                    logging.warning(f'Empty cache file found: {s3_path}')
-            except Exception as e:
-                logging.error(f'Error loading cache file {s3_path}: {e}')
-                continue
+                try:
+                    cache_obj_contents = _get_from_s3(s3_client, s3_bucket, s3_path)
+                    if cache_obj_contents:
+                        cache_contents = json.loads(cache_obj_contents.decode('utf-8'))
+                        cal_id = s3_path.lstrip('cache/').rstrip('.cache')
+                        cache_dict[cal_id] = cache_contents
+                    else:
+                        logging.warning(f'Empty cache file found: {s3_path}')
+                except Exception as e:
+                    logging.error(f'Error loading cache file {s3_path}: {e}')
+                    continue
 
-    except Exception as e:
-        logging.error(f'Error listing S3 objects: {e}')
+        except Exception as e:
+            logging.error(f'Error listing S3 objects: {e}')
 
-    return cache_dict
+        return cache_dict
 
 
 def _update_local_calendar_cache(storage_path, new_cache, old_cache):
@@ -742,24 +758,28 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
             if _should_be_excluded(from_event, exclusions, filters):
                 skipped_due_to_exclusion_match += 1
             else:
+                logging.debug(f'Processing event: {from_event}')
                 found_in_cache = False
                 for cache_event in from_cal_cache:
                     if _get_gcal_event_id(cache_event['id']) == _get_gcal_event_id(from_event['id']):
                         # Found it
                         found_in_cache = True
+                        logging.debug(f'Found matching cache event: {cache_event}')
                         # check to see if it's a canceled event
                         if is_canceled_event(cache_event):
                             logging.info('Canceled event - remove from destination calendar')
                             events_to_delete.append(cache_event)
                             break
                         # now check the updated time
-                        from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
-                        cache_event_updated_time = dateutil.parser.parse(cache_event['last-modified']['dateTime'])
+                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
+                        from_event_updated_time = dateutil.parser.parse(from_event['updated'])
+                        # cache_event_updated_time = dateutil.parser.parse(cache_event['last-modified']['dateTime'])
+                        cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
                         time_diff = cache_event_updated_time - from_event_updated_time
                         # if the from_event has a later updated time, we need to update the event
                         if time_diff.days < 0:
                             # Add this to the events_to_update list
-                            logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
+                            logging.info(f"Cache event with ID: {cache_event['id']} has been modified and should be updated")
                             event_description = from_event.get('description', '')
                             cached_event_description = cache_event.get('description', '')
                             from_event['description'] = get_updated_description(event_description, from_cal_name,
@@ -811,8 +831,10 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             events_to_delete.append(from_event)
                             break
                         # now check the updated time
-                        from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
-                        to_event_updated_time = dateutil.parser.parse(to_event['last-modified']['dateTime'])
+                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
+                        from_event_updated_time = dateutil.parser.parse(from_event['updated'])
+                        # to_event_updated_time = dateutil.parser.parse(to_event['last-modified']['dateTime'])
+                        to_event_updated_time = dateutil.parser.parse(to_event['updated'])
                         time_diff = to_event_updated_time - from_event_updated_time
                         # if the from_event has a later updated time, we need to update the event
                         if time_diff.days < 0:
@@ -832,7 +854,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                         events_to_insert.append(from_event)
 
     if skipped_due_to_exclusion_match > 0:
-        logging.info(f'Skipped {skipped_due_to_exclusion_match} events due to exclusion matches')
+        logging.info(f'Skipped {skipped_due_to_exclusion_match} events due to exclusion or filter matches')
 
     if len(events_to_delete) == 0 and len(events_to_insert) == 0 and len(events_to_update) == 0:
         logging.info('No changes found!')
@@ -898,9 +920,11 @@ def is_canceled_event(event):
     return False
 
 
-def sync_events(service_client, time, config, cache=None, refresh_cache=False, dryrun=False):
+def sync_events(service_client, time, config, refresh_cache=False, dryrun=False):
     old_cache = {}
     new_cache = {}
+    s3_client = boto3.client('s3')
+    bucket = os.environ.get('S3_BUCKET')
     for item in config:
         logging.info(f'Processing {item}')
         dest_cal_id = config[item]['destination_cal_id']
@@ -910,6 +934,7 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
         # filters = config[item].get('filters', None)
         for src_cal_type in source_cals:
             for src_cal in source_cals[src_cal_type]:
+                src_cal_cache = None
                 if 'ics' in src_cal_type:
                     logging.info(f'Getting events from calendar {src_cal} (ICS)')
                     source_cal_info = source_cals[src_cal_type][src_cal]
@@ -938,22 +963,28 @@ def sync_events(service_client, time, config, cache=None, refresh_cache=False, d
                 if refresh_cache:
                     src_cal_cache = None
                 else:
-                    src_cal_cache = (cache[cal_name] if cache and cal_name in cache else None)
+                    if bucket:
+                        src_cal_cache = _load_s3_calendar_cache(s3_client, bucket, cal_name)
+                        if src_cal_cache:
+                            logging.info(f'Found cache for {cal_name}')
+                        else:
+                            logging.info(f'No cache found for {cal_name}')
+                    # src_cal_cache = (cache[cal_name] if cache and cal_name in cache else None)
                 exclusions = source_cal_info.get('exclusions', None)
                 adjustments = source_cal_info.get('adjustments', None)
                 filters = source_cal_info.get('filters', None)
-                updated_cache_events = sync_events_to_calendar(service_client,
-                                                               time,
-                                                               src_cal,
-                                                               src_cal_cache,
-                                                               src_cal_events,
-                                                               dest_cal_id,
-                                                               0,
-                                                               exclusions,
-                                                               filters,
-                                                               adjustments,
-                                                               dryrun)
-                old_cache[cal_name] = (cache[cal_name] if cache and cal_name in cache else None)
+                updated_cache_events = sync_events_to_calendar(service_client=service_client,
+                                                               last_sync=time,
+                                                               from_cal_name=src_cal,
+                                                               from_cal_cache=src_cal_cache,
+                                                               from_cal_events=src_cal_events,
+                                                               to_cal=dest_cal_id,
+                                                               limit=0,
+                                                               exclusions=exclusions,
+                                                               filters=filters,
+                                                               adjustments=adjustments,
+                                                               dryrun=dryrun)
+                old_cache[cal_name] = (src_cal_cache if src_cal_cache else None)
                 # Remove any canceled events from src_cal_event before writing to cache
                 updated_cache_events = [x for x in updated_cache_events if not is_canceled_event(x)]
                 new_cache[cal_name] = updated_cache_events
@@ -998,7 +1029,7 @@ def lambda_handler(event, context):
     # config = _get_config_from_s3(s3_client, bucket)
     # Get the OAUTH credentials
     # _load_creds_from_s3(s3_client, bucket, storage_path)
-    cache = _load_s3_calendar_cache(s3_client, bucket)
+    # cache = _load_s3_calendar_cache(s3_client, bucket)
     # last_sync_time = _get_last_sync_time_from_s3(s3_client, bucket)
 
     if config is None or len(config) == 0:
@@ -1020,7 +1051,10 @@ def lambda_handler(event, context):
 
     cache_refresh = event.get('cache_refresh', False)
     logging.debug("STARTING RUN")
-    old_cache, new_cache = sync_events(service_client, last_sync_time, config, cache, refresh_cache=cache_refresh,
+    old_cache, new_cache = sync_events(service_client,
+                                       last_sync_time,
+                                       config,
+                                       refresh_cache=cache_refresh,
                                        dryrun=dryrun)
 
     if not dryrun:
