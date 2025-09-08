@@ -726,14 +726,18 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
     events_to_insert = []
     events_to_update = []
     skipped_due_to_exclusion_match = 0
+    matched_with_no_changes = 0
     if adjustments:
-        logging.info(f'Note: Found adjustments for given calendar: {adjustments} -  - all events will be adjusted accordingly')
+        logging.info(f'Note: adjustment config present for given calendar - all events will be adjusted accordingly:')
+        logging.info(f'Adjustments: {adjustments}')
     date_time_now = datetime.datetime.now(datetime.UTC).isoformat()
     last_sync_time = dateutil.parser.parse(last_sync)
+    number_of_src_cal_events = len(from_cal_events)
     if from_cal_cache:
-        logging.info(f'Found a cache for the source calendar with name: {from_cal_name}')
+        number_of_cached_events = len(from_cal_cache)
         logging.debug(f'Cached Calendar events: {from_cal_cache}')
-        logging.info('Comparing cached events against Source calendar events')
+        logging.info(f'Comparing cached events ({number_of_cached_events}) '
+                     f'against Source calendar events ({number_of_src_cal_events})')
         # find events to delete - these will exist in from_cal_cache, but not in from_cal_events
         for cache_event in from_cal_cache:
             # Ignore any exclusion matches
@@ -771,9 +775,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             events_to_delete.append(cache_event)
                             break
                         # now check the updated time
-                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
                         from_event_updated_time = dateutil.parser.parse(from_event['updated'])
-                        # cache_event_updated_time = dateutil.parser.parse(cache_event['last-modified']['dateTime'])
                         cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
                         time_diff = cache_event_updated_time - from_event_updated_time
                         # if the from_event has a later updated time, we need to update the event
@@ -786,14 +788,8 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                                                                                 date_time_now, cached_event_description)
                             events_to_update.append(from_event)
                             break
-                        # TODO: Remove the code below if the above is working
-                        # logging.debug(f"Cache event with ID: {cache_event['id']} should be updated")
-                        # event_description = from_event.get('description', '')
-                        # cached_event_description = cache_event.get('description', '')
-                        # from_event['description'] = get_updated_description(event_description, from_cal_name,
-                        #                                                     date_time_now, cached_event_description)
-                        # events_to_update.append(from_event)
-                        # break
+                        else:
+                            matched_with_no_changes += 1
                 if not found_in_cache:
                     # Didn't find the event ID in the cached events - it must be new
                     # check to see if it's a canceled event
@@ -831,9 +827,7 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             events_to_delete.append(from_event)
                             break
                         # now check the updated time
-                        # from_event_updated_time = dateutil.parser.parse(from_event['last-modified']['dateTime'])
                         from_event_updated_time = dateutil.parser.parse(from_event['updated'])
-                        # to_event_updated_time = dateutil.parser.parse(to_event['last-modified']['dateTime'])
                         to_event_updated_time = dateutil.parser.parse(to_event['updated'])
                         time_diff = to_event_updated_time - from_event_updated_time
                         # if the from_event has a later updated time, we need to update the event
@@ -842,10 +836,6 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                             # Need to update this event
                             events_to_update.append(from_event)
                             break
-                        # TODO: Remove the code below if the above is working
-                        # logging.info(f"Event with ID: {from_event['id']} should be updated")
-                        # events_to_update.append(from_event)
-                        # break
                 if not found:
                     # check to see if it's a canceled event
                     if is_canceled_event(from_event):
@@ -855,6 +845,9 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
 
     if skipped_due_to_exclusion_match > 0:
         logging.info(f'Skipped {skipped_due_to_exclusion_match} events due to exclusion or filter matches')
+
+    if matched_with_no_changes > 0:
+        logging.info(f'Found {matched_with_no_changes} events with no changes')
 
     if len(events_to_delete) == 0 and len(events_to_insert) == 0 and len(events_to_update) == 0:
         logging.info('No changes found!')
