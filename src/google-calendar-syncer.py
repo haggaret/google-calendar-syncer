@@ -721,11 +721,10 @@ def get_updated_description(event_description, from_cal_name, sync_time, cached_
 
 
 def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_cache, from_cal_events, to_cal,
-                            limit=0, exclusions=None, filters=None, adjustments=None, dryrun=False):
+                            limit=0, adjustments=None, dryrun=False):
     events_to_delete = []
     events_to_insert = []
     events_to_update = []
-    skipped_due_to_exclusion_match = 0
     matched_with_no_changes = 0
     if adjustments:
         logging.info(f'Note: adjustment config present for given calendar - all events will be adjusted accordingly:')
@@ -740,113 +739,99 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                      f'against Source calendar events ({number_of_src_cal_events})')
         # find events to delete - these will exist in from_cal_cache, but not in from_cal_events
         for cache_event in from_cal_cache:
-            # Ignore any exclusion matches
-            if _should_be_excluded(cache_event, exclusions, filters):
-                skipped_due_to_exclusion_match += 1
-            else:
-                found_in_from = False
-                for from_event in from_cal_events:
-                    if _get_gcal_event_id(cache_event['id']) == _get_gcal_event_id(from_event['id']):
-                        found_in_from = True
-                        break
-                if not found_in_from:
-                    # This cache_event may need to be deleted
-                    if should_be_deleted(cache_event, last_sync_time):
-                        logging.info(f"Cache event with ID: {cache_event['id']} should be deleted")
-                        events_to_delete.append(cache_event)
+            found_in_from = False
+            for from_event in from_cal_events:
+                if _get_gcal_event_id(cache_event['id']) == _get_gcal_event_id(from_event['id']):
+                    found_in_from = True
+                    break
+            if not found_in_from:
+                # This cache_event may need to be deleted
+                if should_be_deleted(cache_event, last_sync_time):
+                    logging.info(f"Cache event with ID: {cache_event['id']} should be deleted")
+                    events_to_delete.append(cache_event)
         # Now find:
         #    events to insert - these will exist in from_cal_events, but not in cache
         #    events to update - these will exist in both cache and from_cal_events, with different updated times
         for from_event in from_cal_events:
-            # Ignore any exclusion matches
-            if _should_be_excluded(from_event, exclusions, filters):
-                skipped_due_to_exclusion_match += 1
-            else:
-                logging.debug(f'Processing event: {from_event}')
-                found_in_cache = False
-                for cache_event in from_cal_cache:
-                    if _get_gcal_event_id(cache_event['id']) == _get_gcal_event_id(from_event['id']):
-                        # Found it
-                        found_in_cache = True
-                        logging.debug(f'Found matching cache event: {cache_event}')
-                        # check to see if it's a canceled event
-                        if is_canceled_event(cache_event):
-                            logging.info('Canceled event - remove from destination calendar')
-                            events_to_delete.append(cache_event)
-                            break
-                        # now check the updated time
-                        from_event_updated_time = dateutil.parser.parse(from_event['updated'])
-                        cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
-                        time_diff = cache_event_updated_time - from_event_updated_time
-                        # if the from_event has a later updated time, we need to update the event
-                        if time_diff.days < 0:
-                            # Add this to the events_to_update list
-                            logging.info(f"Cache event with ID: {cache_event['id']} has been modified and should be updated")
-                            event_description = from_event.get('description', '')
-                            cached_event_description = cache_event.get('description', '')
-                            from_event['description'] = get_updated_description(event_description, from_cal_name,
-                                                                                date_time_now, cached_event_description)
-                            events_to_update.append(from_event)
-                            break
-                        else:
-                            matched_with_no_changes += 1
-                if not found_in_cache:
-                    # Didn't find the event ID in the cached events - it must be new
+            logging.debug(f'Processing event: {from_event}')
+            found_in_cache = False
+            for cache_event in from_cal_cache:
+                if _get_gcal_event_id(cache_event['id']) == _get_gcal_event_id(from_event['id']):
+                    # Found it
+                    found_in_cache = True
+                    logging.debug(f'Found matching cache event: {cache_event}')
                     # check to see if it's a canceled event
-                    if is_canceled_event(from_event):
-                        logging.info('Canceled event - skip')
-                    else:
-                        logging.debug(f"Calendar event with ID: {from_event['id']} should be inserted")
+                    if is_canceled_event(cache_event):
+                        logging.info('Canceled event - remove from destination calendar')
+                        events_to_delete.append(cache_event)
+                        break
+                    # now check the updated time
+                    from_event_updated_time = dateutil.parser.parse(from_event['updated'])
+                    cache_event_updated_time = dateutil.parser.parse(cache_event['updated'])
+                    time_diff = cache_event_updated_time - from_event_updated_time
+                    # if the from_event has a later updated time, we need to update the event
+                    if time_diff.days < 0:
+                        # Add this to the events_to_update list
+                        logging.info(f"Cache event with ID: {cache_event['id']} has been modified and should be updated")
                         event_description = from_event.get('description', '')
-                        from_event['description'] = get_updated_description(event_description, from_cal_name, date_time_now)
-                        events_to_insert.append(from_event)
+                        cached_event_description = cache_event.get('description', '')
+                        from_event['description'] = get_updated_description(event_description, from_cal_name,
+                                                                            date_time_now, cached_event_description)
+                        events_to_update.append(from_event)
+                        break
+                    else:
+                        matched_with_no_changes += 1
+            if not found_in_cache:
+                # Didn't find the event ID in the cached events - it must be new
+                # check to see if it's a canceled event
+                if is_canceled_event(from_event):
+                    logging.info('Canceled event - skip')
+                else:
+                    logging.debug(f"Calendar event with ID: {from_event['id']} should be inserted")
+                    event_description = from_event.get('description', '')
+                    from_event['description'] = get_updated_description(event_description, from_cal_name, date_time_now)
+                    events_to_insert.append(from_event)
     else:
         # No cache present - need to get events from the destination calendar and compare
-        logging.debug('No cache present - need to get events from destination calendar for comparison')
+        logging.info('No cache present - need to get events from destination calendar for comparison')
         logging.debug(f'Getting all events for destination calendar with ID: {to_cal}')
         to_calendar_events = get_events_for_calendar(last_sync, service_client, to_cal, limit)
         logging.debug('Destination Calendar events: {}'.format(json.dumps(to_calendar_events)))
         # Need to loop through the from_cal_events and see if we can find a matching one in the to_calendar_events
         # If we can't find it, then we need to insert the event into the to_calendar
         for from_event in from_cal_events:
-            if _should_be_excluded(from_event, exclusions, filters):
-                skipped_due_to_exclusion_match += 1
-            else:
-                logging.info(f'Processing event: {from_event["summary"]}')
-                event_description = from_event.get('description', '')
-                from_event['description'] = get_updated_description(event_description, from_cal_name, date_time_now)
-                found = False
-                for to_event in to_calendar_events:
-                    # check to see if this to_event matches the from_event
-                    if _get_gcal_event_id(to_event['id']) == _get_gcal_event_id(from_event['id']):
-                        # Found it
-                        found = True
-                        # check to see if it's a canceled event
-                        if is_canceled_event(from_event):
-                            logging.info('Canceled event - remove from destination calendar')
-                            events_to_delete.append(from_event)
-                            break
-                        # now check the updated time
-                        from_event_updated_time = dateutil.parser.parse(from_event['updated'])
-                        to_event_updated_time = dateutil.parser.parse(to_event['updated'])
-                        time_diff = to_event_updated_time - from_event_updated_time
-                        # if the from_event has a later updated time, we need to update the event
-                        if time_diff.days < 0:
-                            logging.info('Found an event that needs to be updated (based on later updated time)')
-                            # Need to update this event
-                            events_to_update.append(from_event)
-                            break
-                if not found:
+            logging.info(f'Processing event: {from_event["summary"]}')
+            event_description = from_event.get('description', '')
+            from_event['description'] = get_updated_description(event_description, from_cal_name, date_time_now)
+            found = False
+            for to_event in to_calendar_events:
+                # check to see if this to_event matches the from_event
+                if _get_gcal_event_id(to_event['id']) == _get_gcal_event_id(from_event['id']):
+                    # Found it
+                    found = True
                     # check to see if it's a canceled event
                     if is_canceled_event(from_event):
-                        logging.info('Canceled event - skip')
-                    else:
-                        events_to_insert.append(from_event)
+                        logging.info('Canceled event - remove from destination calendar')
+                        events_to_delete.append(from_event)
+                        break
+                    # now check the updated time
+                    from_event_updated_time = dateutil.parser.parse(from_event['updated'])
+                    to_event_updated_time = dateutil.parser.parse(to_event['updated'])
+                    time_diff = to_event_updated_time - from_event_updated_time
+                    # if the from_event has a later updated time, we need to update the event
+                    if time_diff.days < 0:
+                        logging.info('Found an event that needs to be updated (based on later updated time)')
+                        # Need to update this event
+                        events_to_update.append(from_event)
+                        break
+            if not found:
+                # check to see if it's a canceled event
+                if is_canceled_event(from_event):
+                    logging.info('Canceled event - skip')
+                else:
+                    events_to_insert.append(from_event)
 
-    if skipped_due_to_exclusion_match > 0:
-        logging.info(f'Skipped {skipped_due_to_exclusion_match} events due to exclusion or filter matches')
-
-    if matched_with_no_changes > 0:
+    if from_cal_cache and matched_with_no_changes > 0:
         logging.info(f'Found {matched_with_no_changes} events with no changes')
 
     if len(events_to_delete) == 0 and len(events_to_insert) == 0 and len(events_to_update) == 0:
@@ -922,9 +907,6 @@ def sync_events(service_client, time, config, refresh_cache=False, dryrun=False)
         logging.info(f'Processing {item}')
         dest_cal_id = config[item]['destination_cal_id']
         source_cals = config[item]['source_cals']
-        # exclusions = config[item].get('exclusions', None)
-        # adjustments = config[item].get('adjustments', None)
-        # filters = config[item].get('filters', None)
         for src_cal_type in source_cals:
             for src_cal in source_cals[src_cal_type]:
                 src_cal_cache = None
@@ -951,6 +933,17 @@ def sync_events(service_client, time, config, refresh_cache=False, dryrun=False)
                     # Unknown calendar type - exit
                     logging.error(f'Unknown source calendar type {src_cal_type} - unable to process')
                     return None, None
+
+                # Filter out excluded events
+                exclusions = source_cal_info.get('exclusions', None)
+                filters = source_cal_info.get('filters', None)
+                original_count = len(src_cal_events)
+                src_cal_events = [event for event in src_cal_events if
+                                  not _should_be_excluded(event, exclusions, filters)]
+                filtered_count = original_count - len(src_cal_events)
+                if filtered_count > 0:
+                    logging.info(f'Filtered out {filtered_count} events due to exclusions/filters')
+
                 cal_name = src_cal
                 logging.debug(f'Source Calendar ({cal_name}) events: {src_cal_events}')
                 if refresh_cache:
@@ -963,9 +956,7 @@ def sync_events(service_client, time, config, refresh_cache=False, dryrun=False)
                         else:
                             logging.info(f'No cache found for {cal_name}')
                     # src_cal_cache = (cache[cal_name] if cache and cal_name in cache else None)
-                exclusions = source_cal_info.get('exclusions', None)
                 adjustments = source_cal_info.get('adjustments', None)
-                filters = source_cal_info.get('filters', None)
                 updated_cache_events = sync_events_to_calendar(service_client=service_client,
                                                                last_sync=time,
                                                                from_cal_name=src_cal,
@@ -973,8 +964,6 @@ def sync_events(service_client, time, config, refresh_cache=False, dryrun=False)
                                                                from_cal_events=src_cal_events,
                                                                to_cal=dest_cal_id,
                                                                limit=0,
-                                                               exclusions=exclusions,
-                                                               filters=filters,
                                                                adjustments=adjustments,
                                                                dryrun=dryrun)
                 old_cache[cal_name] = (src_cal_cache if src_cal_cache else None)
