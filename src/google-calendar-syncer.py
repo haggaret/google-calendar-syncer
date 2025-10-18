@@ -893,7 +893,11 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
         logging.info('No changes found!')
     else:
         if len(events_to_delete) > 0:
-            logging.info(f'Found {len(events_to_delete)} events that need to be deleted')
+            if len(events_to_delete) == 1:
+                log_verbage = 'event that needs to be deleted'
+            else:
+                log_verbage = 'events that need to be deleted'
+            logging.info(f'Found {len(events_to_delete)} {log_verbage}')
             logging.debug(f'{events_to_delete}')
             failed_deletes = 0
             # Delete any old events
@@ -910,7 +914,11 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                 logging.info(f'Failed to delete {str(failed_deletes)} old events from calendar: {to_cal}')
 
         if len(events_to_insert) > 0:
-            logging.info(f'Found {len(events_to_insert)} events that need to be added')
+            if len(events_to_insert) == 1:
+                log_verbage = 'event that needs to be added'
+            else:
+                log_verbage = 'events that need to be added'
+            logging.info(f'Found {len(events_to_insert)} {log_verbage}')
             logging.debug(f'{events_to_insert}')
             failed_inserts = 0
             # Insert any new events
@@ -927,7 +935,11 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                 logging.info(f'Failed to add {str(failed_inserts)} new events to calendar: {to_cal}')
 
         if len(events_to_update) > 0:
-            logging.info(f'Found {len(events_to_update)} events that need to be updated')
+            if len(events_to_update) == 1:
+                log_verbage = 'event that needs to be updated'
+            else:
+                log_verbage = 'events that need to be updated'
+            logging.info(f'Found {len(events_to_update)} {log_verbage}')
             logging.debug(f'{events_to_update}')
             failed_updates = 0
             # Update events that need updating
