@@ -678,20 +678,64 @@ def update_event_in_calendar(service_client, event, calendar, adjustments=None, 
     return result
 
 
-def should_be_deleted(event, last_sync_time):
+def _is_past_event(event, reference_time):
+    """Check if an event started before the reference time"""
+    if isinstance(reference_time, str):
+        reference_time = dateutil.parser.parse(reference_time)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=pytz.UTC)
+
     if 'dateTime' in event['start']:
-        tz = pytz.timezone(event['start']['timeZone'])
-        start_time = dateutil.parser.parse(event['start']['dateTime']).replace(tzinfo=tz)
+        start_time = dateutil.parser.parse(event['start']['dateTime'])
+        if start_time.tzinfo is None and 'timeZone' in event['start']:
+            tz = pytz.timezone(event['start']['timeZone'])
+            start_time = start_time.replace(tzinfo=tz)
+        elif start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=pytz.UTC)
+        return start_time < reference_time
+    elif 'date' in event['start']:
+        start_date = datetime.datetime.strptime(event['start']['date'], '%Y-%m-%d')
+        start_date = start_date.replace(tzinfo=pytz.UTC)
+        return start_date < reference_time
+    return False
+
+
+def should_be_deleted(event, last_sync_time):
+    # Ensure last_sync_time is timezone-aware
+    if isinstance(last_sync_time, str):
+        last_sync_time = dateutil.parser.parse(last_sync_time)
+    if last_sync_time.tzinfo is None:
+        last_sync_time = last_sync_time.replace(tzinfo=pytz.UTC)
+
+    if 'dateTime' in event['start']:
+        # Parse event start time with proper timezone
+        start_time = dateutil.parser.parse(event['start']['dateTime'])
+        if start_time.tzinfo is None and 'timeZone' in event['start']:
+            tz = pytz.timezone(event['start']['timeZone'])
+            start_time = start_time.replace(tzinfo=tz)
+        elif start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=pytz.UTC)
+
+        # Don't delete events that started before last sync (past events)
+        if start_time < last_sync_time:
+            return False
+
+        # Only delete future events that no longer exist in source
         time_diff = start_time - last_sync_time
         if not (time_diff.days < 0):
-            # start time of the cached event is in the future, and it doesn't exist anymore - delete it
             return True
     elif 'date' in event['start']:
-        # all day event
-        start_day = event['start']['date']
-        today = datetime.date.today().isoformat()
-        if start_day > today:
-            # start day of the cached event is in the future, and it doesn't exist anymore - delete it
+        # all day event - convert to datetime for comparison
+        start_date = datetime.datetime.strptime(event['start']['date'], '%Y-%m-%d')
+        start_date = start_date.replace(tzinfo=pytz.UTC)
+
+        # Don't delete past all-day events
+        if start_date < last_sync_time:
+            return False
+
+        # Only delete future all-day events
+        today = datetime.datetime.now(pytz.UTC).date()
+        if start_date.date() > today:
             return True
     return False
 
@@ -746,7 +790,10 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                     break
             if not found_in_from:
                 # This cache_event may need to be deleted
-                if should_be_deleted(cache_event, last_sync_time):
+                # Don't delete past events - they may have been filtered out of source query
+                if _is_past_event(cache_event, last_sync_time):
+                    logging.debug(f"Skipping deletion of past event: {cache_event['id']}")
+                elif should_be_deleted(cache_event, last_sync_time):
                     logging.info(f"Cache event with ID: {cache_event['id']} should be deleted")
                     events_to_delete.append(cache_event)
         # Now find:
@@ -762,8 +809,12 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                     logging.debug(f'Found matching cache event: {cache_event}')
                     # check to see if it's a canceled event
                     if is_canceled_event(cache_event):
-                        logging.info('Canceled event - remove from destination calendar')
-                        events_to_delete.append(cache_event)
+                        # Don't delete past canceled events
+                        if _is_past_event(cache_event, last_sync_time):
+                            logging.debug(f"Skipping deletion of past canceled event: {cache_event['id']}")
+                        else:
+                            logging.info('Canceled event - remove from destination calendar')
+                            events_to_delete.append(cache_event)
                         break
                     # now check the updated time
                     from_event_updated_time = dateutil.parser.parse(from_event['updated'])
@@ -811,8 +862,12 @@ def sync_events_to_calendar(service_client, last_sync, from_cal_name, from_cal_c
                     found = True
                     # check to see if it's a canceled event
                     if is_canceled_event(from_event):
-                        logging.info('Canceled event - remove from destination calendar')
-                        events_to_delete.append(from_event)
+                        # Don't delete past canceled events
+                        if _is_past_event(from_event, last_sync_time):
+                            logging.debug(f"Skipping deletion of past canceled event: {from_event['id']}")
+                        else:
+                            logging.info('Canceled event - remove from destination calendar')
+                            events_to_delete.append(from_event)
                         break
                     # now check the updated time
                     from_event_updated_time = dateutil.parser.parse(from_event['updated'])
